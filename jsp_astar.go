@@ -1,0 +1,179 @@
+package main
+
+import "fmt"
+
+type Pair struct {
+	Job       int
+	Operation int
+}
+
+type Problem struct {
+	JobCount       int
+	JobMachines    [][]int
+	JobDelays      [][]int
+	JobDelayCumSum [][]int
+	MachineToJobs  [][]Pair
+	// CumulativeDelays
+	// MachineDelayCache
+}
+
+func instanceToProblem(instance *Instance) *Problem {
+	problem := Problem{JobCount: instance.Jobs}
+	problem.JobMachines = make([][]int, instance.Jobs)
+	problem.JobDelays = make([][]int, instance.Jobs)
+	problem.JobDelayCumSum = make([][]int, instance.Jobs)
+	problem.MachineToJobs = make([][]Pair, instance.Machines)
+	for j, job := range instance.Work {
+		problem.JobMachines[j] = make([]int, instance.Machines)
+		problem.JobDelays[j] = make([]int, instance.Machines)
+		problem.JobDelayCumSum[j] = make([]int, instance.Machines)
+		for i, pair := range job {
+			problem.JobMachines[j][i] = pair.machine
+			problem.JobDelays[j][i] = pair.delay
+			problem.MachineToJobs[pair.machine] = append(problem.MachineToJobs[pair.machine], Pair{j, i})
+		}
+	}
+
+	for j, job := range instance.Work {
+		for k := len(job) - 1; k >= 0; k -= 1 {
+			for l := k; l >= 0; l -= 1 {
+				problem.JobDelayCumSum[j][l] += problem.JobDelays[j][k]
+			}
+		}
+	}
+	return &problem
+}
+
+func remainingMachineDelay(problem *Problem, machine int, mask int) int {
+	delay := 0
+	for _, pair := range problem.MachineToJobs[machine] {
+		if (mask & (1 << pair.Job)) == 0 {
+			delay += problem.JobDelays[pair.Job][pair.Operation]
+		}
+	}
+	return delay
+}
+
+type Node struct {
+	g              int
+	f              int
+	index          int
+	parent         *Node
+	job            int
+	operation      int
+	machine        int
+	machineJobMask int
+}
+
+func (node *Node) LessThan(other ordered) bool {
+	node2 := other.(*Node)
+	if node.f == node2.f {
+		return node.index > node2.index
+	}
+	return node.f < node2.f
+}
+
+func (node *Node) getJobInfoFor(job int, problem *Problem) (int, int, int, int, int) {
+	prevJobDelay := 0
+	jobPosition := 0
+	for node != nil {
+		if node.job == job {
+			prevJobDelay = node.g
+			jobPosition = node.operation + 1
+			break
+		}
+		node = node.parent
+	}
+
+	nextMachine := -1
+	nextOpDelay := 0
+	remainingJobDelay := 0
+	if jobPosition < problem.JobCount {
+		nextMachine = problem.JobMachines[job][jobPosition]
+		nextOpDelay = problem.JobDelays[job][jobPosition]
+		remainingJobDelay = problem.JobDelayCumSum[job][jobPosition]
+	}
+	return prevJobDelay, nextMachine, jobPosition, nextOpDelay, remainingJobDelay
+}
+
+func (node *Node) getMachineInfoFor(nextMachine int, problem *Problem) (int, int, int) {
+	prevMachineDelay := 0
+	mask := 0
+	for node != nil {
+		if node.machine == nextMachine {
+			prevMachineDelay = node.g
+			mask = node.machineJobMask
+			break
+		}
+		node = node.parent
+	}
+	remainder := remainingMachineDelay(problem, nextMachine, mask)
+	return prevMachineDelay, remainder, mask
+}
+
+func (node *Node) findAndPushNeighbors(opens *PriorityTree[*Node], problem *Problem) (int, *PriorityTree[*Node]) {
+	added := 0
+	idx := 0
+	if node != nil {
+		idx = node.index + 1
+	}
+	for j := 0; j < problem.JobCount; j += 1 {
+		prevJobDelay, machine, opPosition, opDelay, remainingJobDelay := node.getJobInfoFor(j, problem)
+		if machine < 0 {
+			continue
+		}
+		prevMachineDelay, remainingMachDelay, machMask := node.getMachineInfoFor(machine, problem)
+		g := opDelay
+		if prevJobDelay > prevMachineDelay {
+			g += prevJobDelay
+		} else {
+			g += prevMachineDelay
+		}
+		h := -opDelay
+		if remainingJobDelay > remainingMachDelay {
+			h += remainingJobDelay
+		} else {
+			h += remainingMachDelay
+		}
+		if node != nil && node.job != j {
+			if g < node.g {
+				g = node.g
+			}
+			if h < node.f-node.g {
+				h = node.f - node.g
+			}
+		}
+		child := Node{g: g, f: g + h, index: idx, parent: node, job: j, operation: opPosition,
+			machine: machine, machineJobMask: machMask | (1 << j)}
+		opens = opens.MeldElement(&child)
+		added += 1
+	}
+	return added, opens
+}
+
+func (problem *Problem) astar_search() *Node {
+	var opens *PriorityTree[*Node]
+	var root *Node
+	count := 0
+	added, opens := root.findAndPushNeighbors(opens, problem)
+	i := 0
+	for {
+		i += 1
+		lowest := opens.element
+		opens = opens.DeleteMin()
+		added, opens = lowest.findAndPushNeighbors(opens, problem)
+		count += added
+		if added <= 0 {
+			fmt.Printf("Done on iteration %d with %d nodes remaining.\n", i, count-i)
+			return lowest
+		}
+	}
+}
+
+func main() {
+	instances := LoadInstances()
+	instance := instances[1]
+	problem := instanceToProblem(instance)
+	winner := problem.astar_search()
+	fmt.Printf("Score %d should match %d.", winner.g, instance.Optimum)
+}
