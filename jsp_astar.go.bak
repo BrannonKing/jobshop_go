@@ -1,11 +1,8 @@
 package main
 
-import (
-	"fmt"
-	"sort"
-)
+import "fmt"
 
-type JobOpPair struct {
+type Pair struct {
 	Job       int
 	Operation int
 }
@@ -15,7 +12,7 @@ type Problem struct {
 	JobMachines    [][]int
 	JobDelays      [][]int
 	JobDelayCumSum [][]int
-	MachineToJobs  [][]JobOpPair
+	MachineToJobs  [][]Pair
 	// CumulativeDelays
 	// MachineDelayCache
 }
@@ -25,7 +22,7 @@ func instanceToProblem(instance *Instance) *Problem {
 	problem.JobMachines = make([][]int, instance.Jobs)
 	problem.JobDelays = make([][]int, instance.Jobs)
 	problem.JobDelayCumSum = make([][]int, instance.Jobs)
-	problem.MachineToJobs = make([][]JobOpPair, instance.Machines)
+	problem.MachineToJobs = make([][]Pair, instance.Machines)
 	for j, job := range instance.Work {
 		problem.JobMachines[j] = make([]int, instance.Machines)
 		problem.JobDelays[j] = make([]int, instance.Machines)
@@ -33,7 +30,7 @@ func instanceToProblem(instance *Instance) *Problem {
 		for i, pair := range job {
 			problem.JobMachines[j][i] = pair.machine
 			problem.JobDelays[j][i] = pair.delay
-			problem.MachineToJobs[pair.machine] = append(problem.MachineToJobs[pair.machine], JobOpPair{j, i})
+			problem.MachineToJobs[pair.machine] = append(problem.MachineToJobs[pair.machine], Pair{j, i})
 		}
 	}
 
@@ -57,29 +54,23 @@ func remainingMachineDelay(problem *Problem, machine int, mask int) int {
 	return delay
 }
 
-type JobScorePair struct {
-	Job   int
-	Score int
-}
-
 type Node struct {
+	g              int
+	f              int
+	index          int
+	parent         *Node
 	job            int
 	operation      int
 	machine        int
 	machineJobMask int
-	delay          int
-	parent         *Node
-	scores         []JobScorePair
 }
 
 func (node *Node) LessThan(other ordered) bool {
 	node2 := other.(*Node)
-	for i := 0; i < len(node.scores); i++ {
-		if node.scores[i].Score != node2.scores[i].Score {
-			return node.scores[i].Score < node2.scores[i].Score
-		}
+	if node.f == node2.f {
+		return node.index > node2.index
 	}
-	return false // should never happen
+	return node.f < node2.f
 }
 
 func (node *Node) getJobInfoFor(job int, problem *Problem) (int, int, int, int, int) {
@@ -87,7 +78,7 @@ func (node *Node) getJobInfoFor(job int, problem *Problem) (int, int, int, int, 
 	jobPosition := 0
 	for node != nil {
 		if node.job == job {
-			prevJobDelay = node.delay
+			prevJobDelay = node.g
 			jobPosition = node.operation + 1
 			break
 		}
@@ -97,7 +88,7 @@ func (node *Node) getJobInfoFor(job int, problem *Problem) (int, int, int, int, 
 	nextMachine := -1
 	nextOpDelay := 0
 	remainingJobDelay := 0
-	if jobPosition < len(problem.MachineToJobs) { // assuming every job has each machine used once
+	if jobPosition < len(problem.MachineToJobs) {
 		nextMachine = problem.JobMachines[job][jobPosition]
 		nextOpDelay = problem.JobDelays[job][jobPosition]
 		remainingJobDelay = problem.JobDelayCumSum[job][jobPosition]
@@ -110,7 +101,7 @@ func (node *Node) getMachineInfoFor(nextMachine int, problem *Problem) (int, int
 	mask := 0
 	for node != nil {
 		if node.machine == nextMachine {
-			prevMachineDelay = node.delay
+			prevMachineDelay = node.g
 			mask = node.machineJobMask
 			break
 		}
@@ -121,15 +112,12 @@ func (node *Node) getMachineInfoFor(nextMachine int, problem *Problem) (int, int
 }
 
 func (node *Node) findAndPushNeighbors(opens *PriorityTree[*Node], problem *Problem) (int, *PriorityTree[*Node]) {
-	// the plan: if we're max(5, job count) from a table, we have to add a table to these children (or their parent?)
-	// when checking scores, I would still need to build a table for the comparison.
-	// a jump table is no better than a scores table; indeed, the latter would be smaller and not require doing the jump
-	// if all nodes have a sorted table, the comparison function will be fast.
-	// if every other node has a table, I could cut memory use by half,
-	// but I need to find my node's position in the table (half the time)
-
 	added := 0
-	for j := 0; j < problem.JobCount; j++ {
+	idx := 0
+	if node != nil {
+		idx = node.index + 1
+	}
+	for j := 0; j < problem.JobCount; j += 1 {
 		prevJobDelay, machine, opPosition, opDelay, remainingJobDelay := node.getJobInfoFor(j, problem)
 		if machine < 0 {
 			continue
@@ -147,82 +135,45 @@ func (node *Node) findAndPushNeighbors(opens *PriorityTree[*Node], problem *Prob
 		} else {
 			h += remainingMachDelay
 		}
-		scores := make([]JobScorePair, problem.JobCount)
-		if node != nil {
-			copy(scores, node.scores)
-		} else {
-			for i, delays := range problem.JobDelayCumSum {
-				scores[i] = JobScorePair{Job: i, Score: delays[0]}
+		if node != nil && node.job != j {
+			if g < node.g {
+				g = node.g
+			}
+			if h < node.f-node.g {
+				h = node.f - node.g
 			}
 		}
-		for i, pair := range scores {
-			if pair.Job == j {
-				scores[i] = JobScorePair{Job: j, Score: g + h}
-				break
-			}
-		}
-		sort.SliceStable(scores, func(i, j int) bool { return scores[i].Score > scores[j].Score })
-		child := Node{scores: scores, parent: node, delay: g, job: j, operation: opPosition,
+		child := Node{g: g, f: g + h, index: idx, parent: node, job: j, operation: opPosition,
 			machine: machine, machineJobMask: machMask | (1 << j)}
 		opens = opens.MeldElement(&child)
-		added++
+		added += 1
 	}
 	return added, opens
 }
 
 func (problem *Problem) astar_search() *Node {
 	var opens *PriorityTree[*Node]
-	var lowest *Node
-	added := 0
+	var root *Node
 	count := 0
+	added, opens := root.findAndPushNeighbors(opens, problem)
 	i := 0
 	for {
+		i += 1
+		lowest := opens.element
+		opens = opens.DeleteMin()
 		added, opens = lowest.findAndPushNeighbors(opens, problem)
 		count += added
 		if added <= 0 {
-			fmt.Printf("Done on iteration %d with %d nodes remaining.\n", i, count-i+problem.JobCount)
+			fmt.Printf("Done on iteration %d with %d nodes remaining.\n", i, count-i)
 			return lowest
 		}
-		lowest = opens.element
-		opens = opens.DeleteMin()
-		i++
 	}
-}
-
-func toyProblem1() *Problem {
-	p := Problem{JobCount: 1, JobDelays: make([][]int, 1), JobDelayCumSum: make([][]int, 1),
-		JobMachines: make([][]int, 1), MachineToJobs: make([][]JobOpPair, 3)}
-	p.JobDelays[0] = []int{30, 40, 50}
-	p.JobDelayCumSum[0] = []int{120, 90, 50}
-	p.JobMachines[0] = []int{2, 0, 1}
-	p.MachineToJobs[0] = []JobOpPair{{Job: 0, Operation: 1}}
-	p.MachineToJobs[1] = []JobOpPair{{Job: 0, Operation: 2}}
-	p.MachineToJobs[2] = []JobOpPair{{Job: 0, Operation: 0}}
-	return &p
-}
-
-func toyProblem2() *Problem {
-	p := Problem{JobCount: 2, JobDelays: make([][]int, 2), JobDelayCumSum: make([][]int, 2),
-		JobMachines: make([][]int, 2), MachineToJobs: make([][]JobOpPair, 2)}
-	a := 60
-	d := 65
-	p.JobDelays[0] = []int{a, 40}
-	p.JobDelays[1] = []int{50, d}
-	p.JobDelayCumSum[0] = []int{a + 40, 40}
-	p.JobDelayCumSum[1] = []int{50 + d, d}
-	p.JobMachines[0] = []int{1, 0}
-	p.JobMachines[1] = []int{0, 1}
-	p.MachineToJobs[0] = []JobOpPair{{Job: 0, Operation: 1}, {Job: 1, Operation: 0}}
-	p.MachineToJobs[1] = []JobOpPair{{Job: 0, Operation: 0}, {Job: 1, Operation: 1}}
-	return &p
 }
 
 func main() {
 	instances := LoadInstances()
-	instance := instances[1]
+	instance := instances[0]
 	problem := instanceToProblem(instance)
-	//problem := toyProblem2()
 	winner := problem.astar_search()
-	fmt.Printf("Score %d", winner.scores)
-	//fmt.Printf("Score %d should match %d.", winner.scores[0].Score, instance.Optimum)
+	fmt.Printf("Score %d should match %d.", winner.g, instance.Optimum)
 }
