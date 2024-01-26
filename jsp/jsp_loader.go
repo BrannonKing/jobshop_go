@@ -1,4 +1,4 @@
-package main
+package jsp
 
 import (
 	"bufio"
@@ -10,8 +10,8 @@ import (
 )
 
 type WorkPair struct {
-	machine int
-	delay   int
+	Machine int
+	Delay   int
 }
 
 type Instance struct {
@@ -53,7 +53,7 @@ func LoadInstances() []*Instance {
 			for j := 0; j < instance.Machines*2; j += 2 {
 				machine, _ := strconv.Atoi(string(splits[j]))
 				delay, _ := strconv.Atoi(string(splits[j+1]))
-				work = append(work, WorkPair{machine: machine, delay: delay})
+				work = append(work, WorkPair{Machine: machine, Delay: delay})
 			}
 			instance.Work = append(instance.Work, work)
 		}

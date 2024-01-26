@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"jobshop_go/jsp"
 	"sort"
 )
 
@@ -20,7 +21,7 @@ type Problem struct {
 	// MachineDelayCache
 }
 
-func instanceToProblem(instance *Instance) *Problem {
+func instanceToProblem(instance *jsp.Instance) *Problem {
 	problem := Problem{JobCount: instance.Jobs}
 	problem.JobMachines = make([][]int, instance.Jobs)
 	problem.JobDelays = make([][]int, instance.Jobs)
@@ -31,9 +32,9 @@ func instanceToProblem(instance *Instance) *Problem {
 		problem.JobDelays[j] = make([]int, instance.Machines)
 		problem.JobDelayCumSum[j] = make([]int, instance.Machines)
 		for i, pair := range job {
-			problem.JobMachines[j][i] = pair.machine
-			problem.JobDelays[j][i] = pair.delay
-			problem.MachineToJobs[pair.machine] = append(problem.MachineToJobs[pair.machine], JobOpPair{j, i})
+			problem.JobMachines[j][i] = pair.Machine
+			problem.JobDelays[j][i] = pair.Delay
+			problem.MachineToJobs[pair.Machine] = append(problem.MachineToJobs[pair.Machine], JobOpPair{j, i})
 		}
 	}
 
@@ -76,6 +77,9 @@ func (node *Node) LessThan(other ordered) bool {
 	node2 := other.(*Node)
 	for i := 0; i < len(node.scores); i++ {
 		if node.scores[i].Score != node2.scores[i].Score {
+			if i > 0 {
+				return node.scores[i].Score > node2.scores[i].Score
+			}
 			return node.scores[i].Score < node2.scores[i].Score
 		}
 	}
@@ -218,7 +222,7 @@ func toyProblem2() *Problem {
 }
 
 func main() {
-	instances := LoadInstances()
+	instances := jsp.LoadInstances()
 	instance := instances[1]
 	problem := instanceToProblem(instance)
 	//problem := toyProblem2()
