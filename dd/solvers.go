@@ -35,7 +35,7 @@ type State[TValue cmp.Ordered, TCost any] interface {
 type arcTo[TValue cmp.Ordered, TCost any] struct {
 	cost     TCost
 	value    TValue
-	endpoint State[TValue, TCost]
+	endpoint *State[TValue, TCost]
 }
 
 // solver mechanisms: 1. full expansion, 2. max width with merge/Split, 3. by separation, 4. branch and bound
@@ -84,41 +84,47 @@ type arcTo[TValue cmp.Ordered, TCost any] struct {
 func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
 	arcsTo := map[*State[TValue, TCost]][]arcTo[TValue, TCost]{}
 	closed := map[int64][]Keyable{}
-	parents := []State[TValue, TCost]{context.GetStartingState()}
-	variables := context.GetVariables()
-	for j := 0; j < variables; j++ {
-		var children []State[TValue, TCost]
+	starter := context.GetStartingState()
+	parents := []*State[TValue, TCost]{&starter}
+	//variables := context.GetVariables()
+	for j := 0; j < 13; j++ {
+		var children []*State[TValue, TCost]
 		for _, parent := range parents {
 			for _, value := range context.GetValues(j) {
-				child := parent.TransitionTo(context, value)
+				child := (*parent).TransitionTo(context, value)
 				if child == nil {
 					continue
 				}
 				if !addToClosed(closed, child) {
 					continue
 				}
-				cost := parent.CostTo(context, child, value)
-				arcsTo[&parent] = append(arcsTo[&parent], arcTo[TValue, TCost]{cost, value, child})
-				children = append(children, child)
+				cost := (*parent).CostTo(context, child, value)
+				arcsTo[parent] = append(arcsTo[parent], arcTo[TValue, TCost]{cost, value, &child})
+				children = append(children, &child)
 			}
 		}
 		if logger != nil {
 			logger.Printf("Layer %d, %d nodes\n", j+1, len(children))
 		}
+		// left off: using the address on arcs doesn't work
+		// could use an indexing scheme or we could put the list of children into the state object
+		// not sure which of those is easier for the other solver approach.
+		// if putting them into node, use slice, not map
+		// another option is to make everyone store pointers, including the arcs
 		parents = children
 	}
-	return findSolution[TValue, TCost](context, context.GetStartingState(), 0, arcsTo)
+	return findSolution[TValue, TCost](context, &starter, 0, arcsTo)
 }
 
-func findSolution[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], state State[TValue, TCost],
+func findSolution[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], state *State[TValue, TCost],
 	depth int, arcs map[*State[TValue, TCost]][]arcTo[TValue, TCost]) (TCost, []TValue) {
 	bestCost := context.WorstCost()
 	var bestOldValues []TValue
 	var bestValue TValue
-	outputs := arcs[&state]
+	outputs := arcs[state]
 	for _, arc := range outputs {
 		costs, values := findSolution(context, arc.endpoint, depth+1, arcs)
-		if context.Compare(bestCost, costs+arc.cost) {
+		if context.Compare(costs+arc.cost, bestCost) {
 			bestCost = costs + arc.cost
 			bestOldValues = values
 			bestValue = arc.value

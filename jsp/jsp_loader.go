@@ -25,14 +25,14 @@ type Instance struct {
 
 func LoadInstances() []*Instance {
 	var instances []*Instance
-	fileBytes, _ := os.ReadFile("../JSPLIB/instances.json")
+	fileBytes, _ := os.ReadFile("../../JSPLIB/instances.json")
 	err := json.Unmarshal(fileBytes, &instances)
 	if err != nil {
 		panic(err)
 	}
 
 	for _, instance := range instances {
-		file, err := os.Open("../JSPLIB/" + instance.Path)
+		file, err := os.Open("../../JSPLIB/" + instance.Path)
 		if err != nil {
 			panic(err)
 		}

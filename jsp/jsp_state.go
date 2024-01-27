@@ -14,10 +14,10 @@ type jspDetails[TValue constraints.Unsigned, TCost constraints.Integer | constra
 }
 
 type JspContext[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
-	dd.Context[TValue, TCost]
-	lookup  []jspDetails[TValue, TCost]
-	values  []TValue
-	maxCost TCost
+	lookup   []jspDetails[TValue, TCost]
+	values   []TValue
+	maxCost  TCost
+	instance *Instance
 }
 
 func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float](instance *Instance) JspContext[TValue, TCost] {
@@ -26,9 +26,9 @@ func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Int
 	maxCost := TCost(0)
 	for _, row := range instance.Work {
 		for o, data := range row {
-			prerequisite := i - 1
+			prerequisite := i
 			if o == 0 {
-				prerequisite = -1
+				prerequisite = 0
 			}
 			lookup[i] = jspDetails[TValue, TCost]{TValue(data.Machine), TValue(prerequisite), TCost(data.Delay)}
 			maxCost += TCost(data.Delay)
@@ -41,11 +41,11 @@ func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Int
 		values[i] = TValue(i)
 	}
 
-	return JspContext[TValue, TCost]{lookup, values, maxCost}
+	return JspContext[TValue, TCost]{lookup, values, maxCost, instance}
 }
 
 func (j JspContext[TValue, TCost]) GetStartingState() dd.State[TValue, TCost] {
-	return &JspState[TValue, TCost]{}
+	return &JspState[TValue, TCost]{make([]TCost, j.instance.Machines), map[TValue]TCost{}}
 }
 
 func (j JspContext[TValue, TCost]) GetValues(variable int) []TValue {
@@ -65,20 +65,19 @@ func (j JspContext[TValue, TCost]) WorstCost() TCost {
 }
 
 type JspState[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
-	dd.State[TValue, TCost]
 	machine_completions []TCost
 	job_completions     map[TValue]TCost
 }
 
-func (j JspState[TValue, TCost]) TransitionTo(context JspContext[TValue, TCost], value TValue) *JspState[TValue, TCost] {
+func (j JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
 	_, found := j.job_completions[value]
 	if found { // don't do it again
 		return nil
 	}
-	details := context.lookup[value]
+	details := context.(JspContext[TValue, TCost]).lookup[value]
 	completion := j.machine_completions[details.machine] + details.delay
-	if details.prerequisite >= 0 {
-		delay, found := j.job_completions[details.prerequisite]
+	if details.prerequisite > 0 {
+		delay, found := j.job_completions[details.prerequisite-1]
 		if !found {
 			return nil // NOTE: an assumption that Delay
 		}
@@ -90,19 +89,19 @@ func (j JspState[TValue, TCost]) TransitionTo(context JspContext[TValue, TCost],
 	mc[details.machine] = completion
 	jc := maps.Clone(j.job_completions)
 	jc[value] = completion
-	return &JspState[TValue, TCost]{machine_completions: mc, job_completions: jc}
+	return JspState[TValue, TCost]{machine_completions: mc, job_completions: jc}
 }
 
-func (j JspState[TValue, TCost]) CostTo(context JspContext[TValue, TCost], child JspState[TValue, TCost], value TValue) TCost {
-	return slices.Max(child.machine_completions) - slices.Max(j.machine_completions)
+func (j JspState[TValue, TCost]) CostTo(context dd.Context[TValue, TCost], child dd.State[TValue, TCost], value TValue) TCost {
+	return slices.Max(child.(JspState[TValue, TCost]).machine_completions) - slices.Max(j.machine_completions)
 }
 
-func (j JspState[TValue, TCost]) MergeFrom(context JspContext[TValue, TCost], state dd.State[TValue, TCost]) {
+func (j JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], state dd.State[TValue, TCost]) {
 	//TODO implement me
 	panic("implement me")
 }
 
-func (j JspState[TValue, TCost]) Split(context JspContext[TValue, TCost]) []dd.State[TValue, TCost] {
+func (j JspState[TValue, TCost]) Split(context dd.Context[TValue, TCost]) []dd.State[TValue, TCost] {
 	//TODO implement me
 	panic("implement me")
 }
@@ -115,7 +114,8 @@ func (j JspState[TValue, TCost]) Hash() int64 {
 	return sum
 }
 
-func (j JspState[TValue, TCost]) Equals(state JspState[TValue, TCost]) bool {
-	return slices.Equal(j.machine_completions, state.machine_completions) &&
-		maps.Equal(j.job_completions, state.job_completions)
+func (j JspState[TValue, TCost]) Equals(state dd.Keyable) bool {
+	j2 := state.(JspState[TValue, TCost])
+	return slices.Equal(j.machine_completions, j2.machine_completions) &&
+		maps.Equal(j.job_completions, j2.job_completions)
 }
