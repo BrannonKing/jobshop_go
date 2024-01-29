@@ -19,6 +19,16 @@ func TestPermExact(t *testing.T) {
 	}
 }
 
+func TestPermSepa(t *testing.T) {
+	instances := LoadInstances()
+	logger := log.New(os.Stdout, "", 1)
+	context := NewJspPermutationContext[uint16, uint32](instances[0])
+	cost, values := dd.SolveBySeparation[uint16, uint32](context, logger)
+	if int(cost) != instances[0].Optimum {
+		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instances[0].Optimum, values)
+	}
+}
+
 type ITestState interface {
 	Equals(state ITestState) bool
 }

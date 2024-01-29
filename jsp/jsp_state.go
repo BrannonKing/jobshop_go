@@ -1,6 +1,7 @@
 package jsp
 
 import (
+	"cmp"
 	"golang.org/x/exp/constraints"
 	"jobshop_go/dd"
 	"maps"
@@ -57,8 +58,8 @@ func (j *JspContext[TValue, TCost]) GetVariables() int {
 	return len(j.values)
 }
 
-func (j *JspContext[TValue, TCost]) Compare(a, b TCost) bool {
-	return a < b
+func (j *JspContext[TValue, TCost]) Compare(a, b TCost) int {
+	return cmp.Compare(a, b)
 }
 
 func (j *JspContext[TValue, TCost]) WorstCost() TCost {
