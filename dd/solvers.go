@@ -72,6 +72,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 
 	// step 2: while there is a relaxed node in the solution, Unrelax that one
 	rounds := 0
+	nodes := variables + 1
 	for {
 		rounds += 1
 		bestCost, bestArcs := findSolution[TValue, TCost](context, &starter, layers, arcsFromKey)
@@ -99,6 +100,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 				arcsFromKey[&peer] = append(arcsFromKey[&peer], child)
 			}
 			layers[j] = append(layers[j], &peer)
+			nodes += 1
 			cost := (*parent).CostTo(context, peer, arc.value)
 			// recompute and update arc (which means we need to know its parent, which is easy from the chain)
 			for _, subarc := range arcsFromKey[parent] {
@@ -119,7 +121,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			return bestCost, bestValues
 		}
 		if logger != nil {
-			logger.Printf("Round %d, %d nodes, ")
+			logger.Printf("Round %d, %d nodes", rounds, nodes)
 		}
 	}
 
@@ -189,6 +191,7 @@ func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context
 				if childPtr == nil {
 					childPtr = &child
 					closed[hash] = append(closed[hash], childPtr)
+					children = append(children, childPtr)
 				}
 				cost := (*parent).CostTo(context, child, value)
 				arc, found := arcsTo[childPtr]
@@ -196,7 +199,6 @@ func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context
 					arcsTo[childPtr] = arcTo[TValue, TCost]{parent, cost + arcsTo[parent].cost, value}
 					// TODO: cleanup childless state nodes
 				}
-				children = append(children, childPtr)
 			}
 		}
 		clear(closed)
