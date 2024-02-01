@@ -26,6 +26,7 @@ type State[TValue cmp.Ordered, TCost any] interface {
 	CostTo(context Context[TValue, TCost], child State[TValue, TCost], value TValue) TCost
 	MergeFrom(context Context[TValue, TCost], state State[TValue, TCost])
 	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost])
+	Heuristic(context Context[TValue, TCost], runningCost TCost) TCost
 	HashBytes() []byte
 	Equals(state State[TValue, TCost]) bool
 	IsRelaxed() bool
@@ -76,6 +77,15 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 	for {
 		rounds += 1
 		bestCost, bestArcs := findSolution[TValue, TCost](context, &starter, layers, arcsFromKey)
+		if bestArcs == nil {
+			if logger != nil {
+				logger.Printf("Infeasible.\n")
+			}
+			return bestCost, nil
+		}
+		if bestArcs[0].state != &starter {
+			panic("Expected to start at starter")
+		}
 		parent = &starter
 		splitAtLeastOne := false
 		for j, arc := range bestArcs {
@@ -83,12 +93,16 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			if !relaxed.IsRelaxed() {
 				continue
 			}
+			if !slices.Contains(layers[j-1], arc.state) {
+				panic("Expected layer to contain state")
+			}
 			splitAtLeastOne = true
 			// create the exact node:
 			peer := relaxed.TransitionTo(context, arc.value)
 			if peer == nil {
 				panic("This should have never been created the first time")
 			}
+			peerPtr := &peer
 			// TODO: check for duplicates here?
 			// give the old node an option to update itself having had peer ripped from it:
 			relaxed.Unrelax(context, peer)
@@ -97,20 +111,22 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 				cost := peer.CostTo(context, *subarc.state, subarc.value)
 				// TODO: may need to detect infeasible arc here
 				child := arcTo[TValue, TCost]{subarc.state, cost, subarc.value}
-				arcsFromKey[&peer] = append(arcsFromKey[&peer], child)
+				arcsFromKey[peerPtr] = append(arcsFromKey[peerPtr], child)
 			}
-			layers[j] = append(layers[j], &peer)
+			layers[j-1] = append(layers[j-1], peerPtr)
 			nodes += 1
 			cost := (*parent).CostTo(context, peer, arc.value)
 			// recompute and update arc (which means we need to know its parent, which is easy from the chain)
-			for _, subarc := range arcsFromKey[parent] {
+			for si, subarc := range arcsFromKey[parent] {
 				if subarc.value == arc.value { // we could use arc value as a key; it should only be there once
 					subarc.cost = cost
 					parent = subarc.state
-					subarc.state = &peer
+					subarc.state = peerPtr
+					arcsFromKey[parent][si] = subarc
 					break
 				}
 			}
+			break // TODO: remove this
 			// option: break right here to only update the first relaxed node
 		}
 		if !splitAtLeastOne {
@@ -120,8 +136,8 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			}
 			return bestCost, bestValues
 		}
-		if logger != nil {
-			logger.Printf("Round %d, %d nodes", rounds, nodes)
+		if logger != nil && ((rounds%1000) == 0 || logger.Flags() == 1) {
+			logger.Printf("Round %d, %d nodes, %v bound\n", rounds, nodes, bestCost)
 		}
 	}
 
@@ -129,31 +145,66 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 
 func findSolution[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], starter *State[TValue, TCost],
 	layers [][]*State[TValue, TCost], arcsFromKey map[*State[TValue, TCost]][]arcTo[TValue, TCost]) (TCost, []arcTo[TValue, TCost]) {
-	dist := map[*State[TValue, TCost]]arcTo[TValue, TCost]{}
+	dist := map[*State[TValue, TCost]]arcTo[TValue, TCost]{} // TODO: don't reallocate this in every call
 	variables := context.GetVariables()
+	findBestDistance(context, []*State[TValue, TCost]{starter}, arcsFromKey, dist, false)
 	for j := 0; j < variables-1; j++ {
-		for _, state := range layers[j] {
-			children := arcsFromKey[state]
-			for _, child := range children {
-				if context.Compare(dist[child.state].cost, dist[state].cost+child.cost) < 0 {
-					dist[child.state] = arcTo[TValue, TCost]{state, dist[state].cost + child.cost, child.value}
-				}
-			}
+		findBestDistance(context, layers[j], arcsFromKey, dist, true)
+	}
+	var bestState *State[TValue, TCost] = nil
+	bestCost := context.WorstCost()
+	for _, state := range layers[variables-1] {
+		dbs, founda := dist[state]
+		if founda && context.Compare(dbs.cost, bestCost) < 0 {
+			bestState = state
+			bestCost = dbs.cost
 		}
 	}
-	bestState := slices.MinFunc(layers[variables-1], func(a, b *State[TValue, TCost]) int {
-		return context.Compare(dist[a].cost, dist[b].cost)
-	})
-	bestCost := dist[bestState].cost
+	if bestState == nil {
+		return bestCost, nil
+	}
 	bestArcs := make([]arcTo[TValue, TCost], variables)
 	for j := variables - 1; j >= 0; j-- {
-		bestArcs[j] = dist[bestState]
-		bestState = dist[bestState].state
+		dbs, found := dist[bestState]
+		if !found {
+			panic("Unexpected missing state in dist")
+		}
+		bestArcs[j] = dbs
+		bestState = dbs.state
 	}
 	return bestCost, bestArcs
 }
 
-func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
+func findBestDistance[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
+	layer []*State[TValue, TCost], arcsFromKey map[*State[TValue, TCost]][]arcTo[TValue, TCost],
+	dist map[*State[TValue, TCost]]arcTo[TValue, TCost], required bool) {
+	for _, state := range layer {
+		children, found := arcsFromKey[state]
+		if !found {
+			panic("Unable to find state in arcs")
+		}
+		dscost := TCost(0)
+		ds, found := dist[state]
+		if found {
+			dscost = ds.cost
+		} else {
+			if required {
+				continue
+			}
+		}
+		for _, child := range children {
+			cs, found := dist[child.state]
+			if !found || context.Compare(dscost+child.cost, cs.cost) < 0 {
+				dist[child.state] = arcTo[TValue, TCost]{state, dscost + child.cost, child.value}
+				//if !slices.Contains(layers[j+1], child.state) {
+				//	panic("Missing child state!")
+				//}
+			}
+		}
+	}
+}
+
+func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], maxWidth int, logger *log.Logger) (TCost, []TValue) {
 	// we don't need to hold on to all states; only hold those that lead to the best cost for a given state.
 	// when we get to the bottom, we take the best of those for our final solution.
 	// but we have to walk up the chain to get the actual values.
@@ -195,17 +246,27 @@ func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context
 				}
 				cost := (*parent).CostTo(context, child, value)
 				arc, found := arcsTo[childPtr]
-				if !found || context.Compare(arc.cost, cost+arcsTo[parent].cost) < 0 {
+				if !found || context.Compare(cost+arcsTo[parent].cost, arc.cost) < 0 {
 					arcsTo[childPtr] = arcTo[TValue, TCost]{parent, cost + arcsTo[parent].cost, value}
 					// TODO: cleanup childless state nodes
 				}
 			}
 		}
 		clear(closed)
-		if logger != nil {
+		if logger != nil && (logger.Flags()&1) == 1 {
 			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
 		}
-		parents = children
+		if maxWidth > 0 && len(children) > maxWidth {
+			// possible strategies: shuffle, sort, partial sort, sort with random chance of skip
+			slices.SortFunc(children, func(a, b *State[TValue, TCost]) int {
+				// return context.Compare(arcsTo[a].cost, arcsTo[b].cost)
+				return context.Compare((*a).Heuristic(context, arcsTo[a].cost), (*b).Heuristic(context, arcsTo[b].cost))
+			})
+			parents = children[:maxWidth]
+			// parents = append(parents, children[len(children)-maxWidth/2:]...)
+		} else {
+			parents = children
+		}
 	}
 	if len(parents) == 0 { // handle infeasibility
 		return context.WorstCost(), nil

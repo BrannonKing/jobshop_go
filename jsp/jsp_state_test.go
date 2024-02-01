@@ -1,6 +1,7 @@
 package jsp
 
 import (
+	"github.com/stretchr/testify/assert"
 	"jobshop_go/dd"
 	"log"
 	"maps"
@@ -11,22 +12,49 @@ import (
 
 func TestPermExact(t *testing.T) {
 	instances := LoadInstances()
-	logger := log.New(os.Stdout, "", 1)
-	context := NewJspPermutationContext[uint16, uint32](instances[0])
-	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, logger)
-	if int(cost) != instances[0].Optimum {
-		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instances[0].Optimum, values)
+	instance := instances[2]
+	logger := log.New(os.Stdout, "", 0)
+	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
+	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, 1000, logger)
+	if int(cost) != instance.Optimum {
+		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}
 }
 
 func TestPermSepa(t *testing.T) {
 	instances := LoadInstances()
-	logger := log.New(os.Stdout, "", 1)
-	context := NewJspPermutationContext[uint16, uint32](instances[0])
+	logger := log.New(os.Stdout, "", 0)
+	context := NewJspPermutationContext[uint16, uint32](instances[0], 0xffffffff)
 	cost, values := dd.SolveBySeparation[uint16, uint32](context, logger)
 	if int(cost) != instances[0].Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instances[0].Optimum, values)
 	}
+}
+
+func TestMerge(t *testing.T) {
+	a := JspState[uint16, int32]{}
+	a.job_completions = map[uint16]int32{}
+	a.job_completions[3] = 30
+	a.job_completions[4] = 40
+	a.machine_completions = []int32{50, 60}
+	a.job_maybes = map[uint16]int32{}
+	a.job_maybes[1] = 10
+
+	b := JspState[uint16, int32]{}
+	b.job_completions = map[uint16]int32{}
+	b.job_completions[3] = 20
+	b.job_maybes = map[uint16]int32{}
+	b.machine_completions = []int32{5, 70}
+	b.job_maybes[4] = 25
+	b.job_maybes[5] = 50
+
+	a.MergeFrom(nil, &b)
+	assert.EqualValues(t, len(a.machine_completions), 2)
+	assert.EqualValues(t, a.machine_completions[0], 50)
+	assert.EqualValues(t, a.machine_completions[1], 70)
+	assert.EqualValues(t, len(a.job_completions), 1)
+	assert.EqualValues(t, a.job_completions[3], 30)
+	assert.EqualValues(t, len(a.job_maybes), 3)
 }
 
 type ITestState interface {
