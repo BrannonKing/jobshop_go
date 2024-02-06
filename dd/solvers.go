@@ -2,6 +2,8 @@ package dd
 
 import (
 	"cmp"
+	"golang.org/x/exp/constraints"
+	"hash/maphash"
 	"log"
 	"slices"
 )
@@ -22,13 +24,14 @@ type Context[TValue cmp.Ordered, TCost any] interface {
 
 type State[TValue cmp.Ordered, TCost any] interface {
 	TransitionTo(context Context[TValue, TCost], value TValue) State[TValue, TCost]
-	CostTo(context Context[TValue, TCost], child State[TValue, TCost], value TValue) TCost
+	Cost(context Context[TValue, TCost]) TCost
 	MergeFrom(context Context[TValue, TCost], state State[TValue, TCost])
 	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost], value TValue)
-	Heuristic(context Context[TValue, TCost], runningCost TCost) TCost
-	Hash() uint64
+	Heuristic(context Context[TValue, TCost]) TCost
+	HashBytes() []byte
 	Equals(state State[TValue, TCost]) bool
 	IsRelaxed() bool
+	Solution(context Context[TValue, TCost]) []TValue
 }
 
 type arcTo[TValue cmp.Ordered, TCost any] struct {
@@ -39,7 +42,7 @@ type arcTo[TValue cmp.Ordered, TCost any] struct {
 
 // solver mechanisms: 1. full expansion, 2. max width with merge/Unrelax, 3. by separation, 4. branch and bound
 
-func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
+func SolveBySeparation[TValue cmp.Ordered, TCost constraints.Float | constraints.Integer](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
 
 	// since we don't know which arc is best in a relaxed situation, we have to allow multiple input arcs per child
 	arcsFromKey := map[*State[TValue, TCost]][]arcTo[TValue, TCost]{} // holds all nodes going from key in this context
@@ -57,7 +60,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 				continue
 			}
 			layers[j] = append(layers[j], &child)
-			cost := (*parent).CostTo(context, child, value)
+			cost := child.Cost(context) - (*parent).Cost(context)
 			arcsFromKey[parent] = append(arcsFromKey[parent], arcTo[TValue, TCost]{&child, cost, value})
 		}
 		if len(layers[j]) == 0 { // infeasible
@@ -111,14 +114,14 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			relaxed.Unrelax(context, peer, arc.value)
 			// now duplicate the immediate descendants of the old endpoint
 			for _, subarc := range arcsFromKey[arc.state] {
-				cost := peer.CostTo(context, *subarc.state, subarc.value)
+				cost := (*subarc.state).Cost(context) - (peer).Cost(context)
 				// TODO: may need to detect infeasible arc here
 				child := arcTo[TValue, TCost]{subarc.state, cost, subarc.value}
 				arcsFromKey[peerPtr] = append(arcsFromKey[peerPtr], child)
 			}
 			layers[j] = append(layers[j], peerPtr)
 			nodes += 1
-			cost := (*parent).CostTo(context, peer, arc.value)
+			cost := peer.Cost(context) - (*parent).Cost(context)
 			// recompute and update arc (which means we need to know its parent, which is easy from the chain)
 			for si, subarc := range arcsFromKey[parent] {
 				if subarc.value == arc.value { // we could use arc value as a key; it should only be there once
@@ -215,16 +218,17 @@ func findBestDistance[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 }
 
 func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
-	reducer func([]*State[TValue, TCost], map[*State[TValue, TCost]]arcTo[TValue, TCost]) []*State[TValue, TCost],
-	logger *log.Logger) (TCost, []TValue) {
+	reducer func([]*State[TValue, TCost]) []*State[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
 	// we don't need to hold on to all states; only hold those that lead to the best cost for a given state.
 	// when we get to the bottom, we take the best of those for our final solution.
 	// but we have to walk up the chain to get the actual values.
-	arcsTo := map[*State[TValue, TCost]]arcTo[TValue, TCost]{} // holds the best arc going to key
 	closed := map[uint64][]*State[TValue, TCost]{}
 	starter := context.GetStartingState()
 	parents := []*State[TValue, TCost]{&starter}
 	variables := context.GetVariables()
+	var bestSolution State[TValue, TCost]
+	bestCost := context.WorstCost()
+	hasher := maphash.Hash{}
 	for j := 0; j < variables; j++ {
 		var children []*State[TValue, TCost]
 		duplicates := 0
@@ -236,7 +240,9 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 				}
 				// here is an expensive check for existing nodes.
 				// we're not sure if the size of the map is less than the size of the additional duplicate nodes
-				hash := child.Hash()
+				hasher.Reset()
+				hasher.Write(child.HashBytes())
+				hash := hasher.Sum64()
 				others, found := closed[hash]
 				var childPtr *State[TValue, TCost]
 				if found {
@@ -251,13 +257,15 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 				if childPtr == nil {
 					childPtr = &child
 					closed[hash] = append(closed[hash], childPtr)
-					children = append(children, childPtr)
-				}
-				cost := (*parent).CostTo(context, child, value)
-				arc, found := arcsTo[childPtr]
-				if !found || context.Compare(cost+arcsTo[parent].cost, arc.cost) < 0 {
-					arcsTo[childPtr] = arcTo[TValue, TCost]{parent, cost + arcsTo[parent].cost, value}
-					// TODO: cleanup childless state nodes
+					if j == variables-1 {
+						childCost := (*childPtr).Cost(context)
+						if context.Compare(childCost, bestCost) < 0 {
+							bestSolution = *childPtr
+							bestCost = childCost
+						}
+					} else {
+						children = append(children, childPtr)
+					}
 				}
 			}
 		}
@@ -265,31 +273,23 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 		if logger != nil && (logger.Flags()&1) == 1 {
 			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
 		}
-		parents = reducer(children, arcsTo)
+		if j < variables-1 {
+			parents = reducer(children)
+			if len(parents) == 0 { // handle infeasibility
+				return context.WorstCost(), nil
+			}
+		}
 	}
-	if len(parents) == 0 { // handle infeasibility
-		return context.WorstCost(), nil
-	}
-	bestSolution := slices.MinFunc(parents, func(a, b *State[TValue, TCost]) int {
-		return context.Compare(arcsTo[a].cost, arcsTo[b].cost)
-	})
-	bestValues := make([]TValue, variables)
-	bestCost := arcsTo[bestSolution].cost
-	for j := variables - 1; j >= 0; j-- {
-		arc := arcsTo[bestSolution]
-		bestValues[j] = arc.value
-		bestSolution = arc.state
-	}
-	return bestCost, bestValues
+	return bestSolution.Cost(context), bestSolution.Solution(context)
 }
 
 func SolveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], maxWidth int, logger *log.Logger) (TCost, []TValue) {
-	reducer := func(children []*State[TValue, TCost], arcsTo map[*State[TValue, TCost]]arcTo[TValue, TCost]) []*State[TValue, TCost] {
+	reducer := func(children []*State[TValue, TCost]) []*State[TValue, TCost] {
 		if maxWidth > 0 && len(children) > maxWidth {
 			// possible strategies: shuffle, sort, partial sort, sort with random chance of skip
 			slices.SortFunc(children, func(a, b *State[TValue, TCost]) int {
 				// return context.Compare(arcsTo[a].cost, arcsTo[b].cost)
-				return context.Compare((*a).Heuristic(context, arcsTo[a].cost), (*b).Heuristic(context, arcsTo[b].cost))
+				return context.Compare((*a).Heuristic(context), (*b).Heuristic(context))
 			})
 			return children[:maxWidth]
 		} else {
@@ -300,19 +300,28 @@ func SolveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVal
 }
 
 func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
-	reducer := func(children []*State[TValue, TCost], arcsTo map[*State[TValue, TCost]]arcTo[TValue, TCost]) []*State[TValue, TCost] {
+	reducer := func(children []*State[TValue, TCost]) []*State[TValue, TCost] {
 		return children
 	}
 	return solveByExpansion[TValue, TCost](context, reducer, logger)
 }
 
+type PartitionPair struct {
+	Start, End int
+}
+
+type Partition struct {
+	Keepers     []int
+	MergeGroups []PartitionPair
+}
+
 type PartitionStrategy[TValue cmp.Ordered, TCost cmp.Ordered] interface {
-	partition(states []*State[TValue, TCost], findCost func(i int) TCost) []*State[TValue, TCost]
+	Find(context Context[TValue, TCost], states []*State[TValue, TCost]) Partition
 }
 
 func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
 	strategy PartitionStrategy[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
-	reducer := func(children []*State[TValue, TCost], arcsTo map[*State[TValue, TCost]]arcTo[TValue, TCost]) []*State[TValue, TCost] {
+	reducer := func(children []*State[TValue, TCost]) []*State[TValue, TCost] {
 		// can put the method on the context object.
 		// or we can do the clustering (or sorting) here
 
@@ -327,19 +336,25 @@ func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue,
 		// 3. random groups; keep 1 best and merge the rest into another one
 		// 4. cluster on similarity of done jobs (though in the final layers they will have done most everything)
 
-		//keepers, groups := strategy.partition(children, func(i int) { return arcsTo[children[i]].cost })
-		//// making an assumption that keepers is not the same slice as children
-		//for g := 0; g < len(groups); g++ {
-		//	target := groups[g][0]
-		//	for i := 1; i < len(groups[g]); i++ {
-		//		target.MergeFrom(context, groups[g][i])
-		//		arc := arcsTo[groups[g][i]]
-		//		// left off: return a list of arcs all going to the same target, maybe by index
-		//	}
-		//	keepers = append(keepers, target)
-		//}
-		//return keepers
-		return children
+		partition := strategy.Find(context, children)
+		if len(partition.Keepers) == 0 && len(partition.MergeGroups) == 0 {
+			return children
+		}
+		keepers := make([]*State[TValue, TCost], 0, len(partition.Keepers)+len(partition.MergeGroups))
+		for _, i := range partition.Keepers {
+			keepers = append(keepers, children[i])
+		}
+		for g := 0; g < len(partition.MergeGroups); g++ {
+			if partition.MergeGroups[g].Start >= partition.MergeGroups[g].End {
+				continue
+			}
+			target := children[partition.MergeGroups[g].Start]
+			for i := partition.MergeGroups[g].Start + 1; i < partition.MergeGroups[g].End; i++ {
+				(*target).MergeFrom(context, *children[i])
+			}
+			keepers = append(keepers, target)
+		}
+		return keepers
 	}
 	return solveByExpansion[TValue, TCost](context, reducer, logger)
 }

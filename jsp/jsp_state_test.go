@@ -12,7 +12,7 @@ import (
 
 func TestFull(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[1]
+	instance := instances[0]
 	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, logger)
@@ -34,10 +34,10 @@ func TestRestricted(t *testing.T) {
 
 func TestRelaxed(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[2]
-	logger := log.New(os.Stdout, "", 0)
+	instance := instances[1]
+	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRelaxed[uint16, uint32](context, nil, logger)
+	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspPartitionStrategy[uint16, uint32]{300}, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}
@@ -56,26 +56,29 @@ func TestPermSepa(t *testing.T) {
 
 func TestMerge(t *testing.T) {
 	a := JspState[uint16, int32]{}
-	a.job_completions = map[uint16]int32{}
-	a.job_completions[3] = 30
-	a.job_completions[4] = 40
-	a.cmax = 60
-	a.job_maybes = map[uint16]int32{}
-	a.job_maybes[1] = 10
+	a.job_all = map[uint16]int32{}
+	a.job_all[3] = 30
+	a.job_all[4] = 40
+	a.mach_completions = []int32{50, 60}
+	a.job_some = map[uint16]int32{}
+	a.job_some[1] = 10
 
 	b := JspState[uint16, int32]{}
-	b.job_completions = map[uint16]int32{}
-	b.job_completions[3] = 20
-	b.job_maybes = map[uint16]int32{}
-	b.cmax = 70
-	b.job_maybes[4] = 25
-	b.job_maybes[5] = 50
+	b.job_all = map[uint16]int32{}
+	b.job_all[3] = 20
+	b.job_some = map[uint16]int32{}
+	b.mach_completions = []int32{5, 70}
+	b.job_some[4] = 25
+	b.job_some[5] = 50
 
 	a.MergeFrom(nil, &b)
-	assert.EqualValues(t, a.cmax, 70)
-	assert.EqualValues(t, len(a.job_completions), 1)
-	assert.EqualValues(t, a.job_completions[3], 30)
-	assert.EqualValues(t, len(a.job_maybes), 3)
+	assert.EqualValues(t, 2, len(a.mach_completions))
+	assert.EqualValues(t, 5, a.mach_completions[0])
+	assert.EqualValues(t, 60, a.mach_completions[1])
+	assert.EqualValues(t, 1, len(a.job_all))
+	assert.EqualValues(t, 30, a.job_all[3])
+	assert.EqualValues(t, 3, len(a.job_some))
+	assert.EqualValues(t, 40, a.job_some[4])
 }
 
 type ITestState interface {

@@ -3,8 +3,11 @@ package jsp
 import (
 	"cmp"
 	"golang.org/x/exp/constraints"
+	"hash/maphash"
 	"jobshop_go/dd"
 	"maps"
+	"slices"
+	"unsafe"
 )
 
 type jspDetails[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
@@ -32,6 +35,7 @@ type JspContext[TValue constraints.Unsigned, TCost constraints.Integer | constra
 	instance          *Instance
 	tasksByTotalDelay []TValue
 	tasksByMachine    [][]TValue
+	hasher            maphash.Hash
 }
 
 func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float](instance *Instance, maxTCost TCost) *JspContext[TValue, TCost] {
@@ -83,11 +87,11 @@ func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Int
 	})
 
 	return &JspContext[TValue, TCost]{lookup, values, maxCost, instance,
-		tasksByTotalDelay, tasksByMachine}
+		tasksByTotalDelay, tasksByMachine, maphash.Hash{}}
 }
 
 func (j *JspContext[TValue, TCost]) GetStartingState() dd.State[TValue, TCost] {
-	return &JspState[TValue, TCost]{nil, nil, 0, 0, 0}
+	return &JspState[TValue, TCost]{make([]TCost, j.instance.Machines), nil, nil, 0}
 }
 
 func (j *JspContext[TValue, TCost]) GetValues(variable int) []TValue {
@@ -107,112 +111,106 @@ func (j *JspContext[TValue, TCost]) WorstCost() TCost {
 }
 
 type JspState[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
-	job_completions map[TValue]TCost
-	job_maybes      map[TValue]TCost
-	hash            uint64
-	cmax            TCost // caches the latest completion
-	heuristic       TCost // caches the score for the restriction if necessary
+	mach_completions []TCost
+	job_all          map[TValue]TCost
+	job_some         map[TValue]TCost
+	heuristic        TCost // caches the score for the restriction if necessary
 }
 
 func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
-	_, found := j.job_completions[value]
+	_, found := j.job_all[value]
 	if found { // don't do it again
 		return nil
 	}
 	details := context.(*JspContext[TValue, TCost]).lookup[value]
-	completion := TCost(0)
-	maybePrereq := false
+	canStart := TCost(0)
 	if details.prerequisite > 0 {
-		delay, found := j.job_completions[details.prerequisite-1]
+		canStart, found = j.job_all[details.prerequisite-1]
 		if !found {
-			delay, found = j.job_maybes[details.prerequisite-1]
+			canStart, found = j.job_some[details.prerequisite-1]
 			if !found {
 				return nil // NOTE: an assumption that Delay
 			}
-			maybePrereq = true
-			for _, op := range context.(*JspContext[TValue, TCost]).tasksByMachine[details.machine] {
-				delay = max(delay, j.job_maybes[op])
-			}
-		}
-		completion = delay + details.delay
-	}
-	// of the maybes, we've done at least one? yes. And if we have just one left after split, we should convert it to solid
-	for _, op := range context.(*JspContext[TValue, TCost]).tasksByMachine[details.machine] {
-		completion = max(completion, j.job_completions[op]+details.delay)
-	}
-	var jc map[TValue]TCost
-	var jm map[TValue]TCost
-	if maybePrereq {
-		jc = j.job_completions
-		jm = maps.Clone(j.job_maybes)
-		jm[value] = completion
-	} else {
-		if j.job_completions == nil {
-			jc = map[TValue]TCost{value: completion}
-		} else {
-			jc = maps.Clone(j.job_completions)
-			jc[value] = completion
-		}
-		_, found = j.job_maybes[value]
-		if found {
-			jm = maps.Clone(j.job_maybes)
-			delete(jm, value)
-		} else {
-			jm = j.job_maybes
 		}
 	}
-	return &JspState[TValue, TCost]{job_completions: jc, job_maybes: jm, hash: j.hash + (2654435761 * uint64(completion)),
-		cmax: max(j.cmax, completion), heuristic: 0}
+	canStart = max(j.mach_completions[details.machine], canStart) + details.delay
+	jm := slices.Clone(j.mach_completions)
+	jm[details.machine] = canStart
+	ja := maps.Clone(j.job_all)
+	if ja == nil {
+		ja = map[TValue]TCost{}
+	}
+	ja[value] = canStart
+	js := j.job_some
+	if _, found = j.job_some[value]; found {
+		js = maps.Clone(j.job_some)
+		delete(js, value)
+	}
+	return &JspState[TValue, TCost]{jm, ja, js, 0}
 }
 
-func (j *JspState[TValue, TCost]) CostTo(context dd.Context[TValue, TCost], child dd.State[TValue, TCost], value TValue) TCost {
-	return child.(*JspState[TValue, TCost]).cmax - j.cmax
+func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost {
+	return slices.Max(j.mach_completions)
+}
+
+func (j *JspState[TValue, TCost]) Solution(context dd.Context[TValue, TCost]) []TValue {
+	// copy the map into a slice and then sort it
+	var values []TValue
+	for k := range j.job_all {
+		values = append(values, k)
+	}
+	slices.SortFunc(values, func(a, b TValue) int {
+		return context.Compare(j.job_all[a], j.job_all[b])
+	})
+	return values
 }
 
 func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], state dd.State[TValue, TCost]) {
 	// completions become intersection of two completions.
 	// maybies become union of maybies plus any rejected completions.
 	// cmax becomes biggest of any completions and the smallest maybe (since we know we've done at least one of those).
-	// except we shouldn't need to shrink cmax just because we lost all our completions?
 	incoming := state.(*JspState[TValue, TCost])
 	j.heuristic = 0
-	if len(j.job_completions) <= 0 && len(j.job_maybes) <= 0 {
+	if len(j.job_all) <= 0 && len(j.job_some) <= 0 {
 		// we're brand new; just copy in the other; and we never update those, so we can just point to the same data
-		j.cmax = incoming.cmax
-		j.job_completions = incoming.job_completions
-		j.job_maybes = incoming.job_maybes
+		j.mach_completions = incoming.mach_completions
+		j.job_all = incoming.job_all
+		j.job_some = incoming.job_some
 	} else {
 		// merge is a relaxed node: it has to be a lower bound
-		j.cmax = min(j.cmax, incoming.cmax)
-		if j.job_maybes == nil {
-			j.job_maybes = make(map[TValue]TCost)
+		for m := 0; m < len(incoming.mach_completions); m++ {
+			j.mach_completions[m] = min(j.mach_completions[m], incoming.mach_completions[m])
+		}
+
+		if j.job_some == nil {
+			j.job_some = make(map[TValue]TCost)
 		}
 		// completions have to be in both.
 		// otherwise we have to take the worst of the maybes.
-		for key, mc := range j.job_completions {
-			mci, found := incoming.job_completions[key]
+		for key, mc := range j.job_all {
+			mci, found := incoming.job_all[key]
 			if !found {
-				j.job_maybes[key] = mc
-				delete(j.job_completions, key)
+				j.job_some[key] = mc
+				delete(j.job_all, key)
 			} else {
 				// if it's in both, we need to keep the worst score for it.
-				j.job_completions[key] = max(mc, mci)
+				j.job_all[key] = min(mc, mci)
 			}
 		}
-		for key, mci := range incoming.job_completions {
-			mc, found := j.job_completions[key]
+		for key, mci := range incoming.job_all {
+			mc, found := j.job_all[key]
 			if found {
-				j.job_completions[key] = max(mc, mci)
+				j.job_all[key] = min(mc, mci)
 			} else {
-				j.job_maybes[key] = max(j.job_maybes[key], mci)
+				j.job_some[key] = min(j.job_some[key], mci)
 			}
 		}
-		for key, mc := range incoming.job_maybes {
-			current, found := j.job_maybes[key]
+		for key, mc := range incoming.job_some {
+			current, found := j.job_some[key]
 			if found {
-				j.job_maybes[key] = max(current, mc)
+				j.job_some[key] = min(current, mc)
 			} else {
-				j.job_maybes[key] = mc
+				j.job_some[key] = mc
 			}
 		}
 	}
@@ -220,16 +218,13 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 
 func (j *JspState[TValue, TCost]) Unrelax(context dd.Context[TValue, TCost], removed dd.State[TValue, TCost], value TValue) {
 	// it needs to remove that value only if all the parents of this node don't have it?
-	jv := j.job_maybes[value]
-	delete(j.job_maybes, value)
-	if len(j.job_maybes) == 1 {
-		for k, v := range j.job_maybes {
-			j.job_completions[k] = v
-			delete(j.job_maybes, k)
+	// jv := j.job_some[value]
+	delete(j.job_some, value)
+	if len(j.job_some) == 1 {
+		for k, v := range j.job_some {
+			j.job_all[k] = v
+			delete(j.job_some, k)
 		}
-	}
-	if jv == j.cmax {
-
 	}
 	// or we could shrink it back to the parents' completion time.
 }
@@ -239,20 +234,20 @@ func (j *JspContext[TValue, TCost]) heuristic(state *JspState[TValue, TCost]) TC
 	// can select item with most delay or item with most ops.
 	// Easiest for starters: do the overall list, ordered by most delay to least.
 	// Make a list of work to be done. Then sort it. Then add each item from that list.
-	//if len(state.job_maybes) > 0 {
+	//if len(state.job_some) > 0 {
 	//	panic("Not implemented")
 	//}
 	//
 	//dones := map[TValue]TCost{}
 	//for _, task := range j.tasksByTotalDelay {
-	//	_, found := state.job_completions[task]
+	//	_, found := state.job_all[task]
 	//	if found {
 	//		continue
 	//	}
 	//	details := j.lookup[task]
 	//	completion := details.delay + mcs[details.machine]
 	//	if details.prerequisite > 0 { // assuming we're sorted to support prereqs
-	//		delay := max(state.job_completions[details.prerequisite-1], dones[details.prerequisite-1])
+	//		delay := max(state.job_all[details.prerequisite-1], dones[details.prerequisite-1])
 	//		if delay <= 0 {
 	//			panic("Expected to have all prereqs!")
 	//		}
@@ -266,8 +261,8 @@ func (j *JspContext[TValue, TCost]) heuristic(state *JspState[TValue, TCost]) TC
 	return 0
 }
 
-func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost], runningCost TCost) TCost {
-	return runningCost
+func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost]) TCost {
+	return j.Cost(context)
 
 	// return an estimate of the remaining time
 	//if j.heuristic > 0 {
@@ -282,16 +277,52 @@ func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost], r
 	//return j.heuristic
 }
 
-func (j *JspState[TValue, TCost]) Hash() uint64 { // we assume that the result of this will be consumed right away
-	return j.hash
+func (j *JspState[TValue, TCost]) HashBytes() []byte { // we assume that the result of this will be consumed right away
+	size := unsafe.Sizeof(j.mach_completions[0])
+	return unsafe.Slice((*byte)(unsafe.Pointer(&j.mach_completions[0])), int(size)*len(j.mach_completions))
 }
 
 func (j *JspState[TValue, TCost]) Equals(state dd.State[TValue, TCost]) bool {
 	j2 := state.(*JspState[TValue, TCost])
-	return j.cmax == j2.cmax &&
-		maps.Equal(j.job_completions, j2.job_completions) && maps.Equal(j.job_maybes, j2.job_maybes)
+	return slices.Equal(j.mach_completions, j2.mach_completions) &&
+		maps.Equal(j.job_all, j2.job_all) && maps.Equal(j.job_some, j2.job_some)
 }
 
 func (j *JspState[TValue, TCost]) IsRelaxed() bool {
-	return len(j.job_maybes) > 0
+	return len(j.job_some) > 0
+}
+
+type JspPartitionStrategy[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
+	MaxWidth int
+}
+
+func (j JspPartitionStrategy[TValue, TCost]) Find(context dd.Context[TValue, TCost], states []*dd.State[TValue, TCost]) dd.Partition {
+	//rand.Shuffle(len(states), func(i, j int) { // yikes! risky side-effects
+	//	states[i], states[j] = states[j], states[i]
+	//})
+	// if we're 500 wide and want only 100, we want groups of 5
+	result := dd.Partition{}
+	lastStart := 0
+	slotWidth := len(states) / j.MaxWidth
+	if slotWidth < 2 {
+		return result
+	}
+	for g := 0; g < slotWidth*j.MaxWidth; g += slotWidth {
+		best := context.WorstCost()
+		bestIdx := -1
+		for i := g; i < g+slotWidth; i++ {
+			cost := (*states[i]).Cost(context)
+			if cost < best {
+				best = cost
+				bestIdx = i
+			}
+		}
+		result.Keepers = append(result.Keepers, bestIdx)
+		if lastStart < bestIdx {
+			result.MergeGroups = append(result.MergeGroups, dd.PartitionPair{lastStart, bestIdx})
+		}
+		lastStart = bestIdx + 1
+	}
+	result.MergeGroups = append(result.MergeGroups, dd.PartitionPair{lastStart, len(states)})
+	return result
 }
