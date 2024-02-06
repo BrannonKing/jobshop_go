@@ -12,8 +12,8 @@ import (
 
 func TestFull(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[0]
-	logger := log.New(os.Stdout, "", 0)
+	instance := instances[1]
+	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, logger)
 	if int(cost) != instance.Optimum {
@@ -37,7 +37,7 @@ func TestRelaxed(t *testing.T) {
 	instance := instances[2]
 	logger := log.New(os.Stdout, "", 0)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRelaxed[uint16, uint32](context, logger)
+	cost, values := dd.SolveRelaxed[uint16, uint32](context, nil, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}

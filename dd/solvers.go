@@ -24,7 +24,7 @@ type State[TValue cmp.Ordered, TCost any] interface {
 	TransitionTo(context Context[TValue, TCost], value TValue) State[TValue, TCost]
 	CostTo(context Context[TValue, TCost], child State[TValue, TCost], value TValue) TCost
 	MergeFrom(context Context[TValue, TCost], state State[TValue, TCost])
-	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost])
+	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost], value TValue)
 	Heuristic(context Context[TValue, TCost], runningCost TCost) TCost
 	Hash() uint64
 	Equals(state State[TValue, TCost]) bool
@@ -49,25 +49,28 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 	layers := make([][]*State[TValue, TCost], variables)
 	starter := context.GetStartingState()
 	parent := &starter
+
 	for j := 0; j < variables; j++ {
-		merged := context.GetStartingState()
 		for _, value := range context.GetValues(j) {
 			child := (*parent).TransitionTo(context, value)
 			if child == nil {
 				continue
 			}
-			merged.MergeFrom(context, child)
+			layers[j] = append(layers[j], &child)
+			cost := (*parent).CostTo(context, child, value)
+			arcsFromKey[parent] = append(arcsFromKey[parent], arcTo[TValue, TCost]{&child, cost, value})
 		}
-		if merged.Equals(starter) { // infeasible
+		if len(layers[j]) == 0 { // infeasible
 			return context.WorstCost(), nil
 		}
-		mergedPtr := &merged
-		for _, value := range context.GetValues(j) {
-			cost := (*parent).CostTo(context, merged, value)
-			arcsFromKey[parent] = append(arcsFromKey[parent], arcTo[TValue, TCost]{mergedPtr, cost, value})
+
+		merger := layers[j][0]
+		for i := 1; i < len(layers[j]); i++ {
+			(*merger).MergeFrom(context, *layers[j][i])
+			arcsFromKey[parent][i].state = merger
 		}
-		parent = mergedPtr
-		layers[j] = []*State[TValue, TCost]{mergedPtr}
+		layers[j] = layers[j][:1]
+		parent = merger
 	}
 
 	// step 2: while there is a relaxed node in the solution, Unrelax that one
@@ -92,6 +95,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			if !relaxed.IsRelaxed() {
 				continue
 			}
+			// TODO: remove this assertion:
 			if !slices.Contains(layers[j], arc.state) {
 				panic("Expected layer to contain state")
 			}
@@ -104,7 +108,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			peerPtr := &peer
 			// TODO: check for duplicates here?
 			// give the old node an option to update itself having had peer ripped from it:
-			relaxed.Unrelax(context, peer)
+			relaxed.Unrelax(context, peer, arc.value)
 			// now duplicate the immediate descendants of the old endpoint
 			for _, subarc := range arcsFromKey[arc.state] {
 				cost := peer.CostTo(context, *subarc.state, subarc.value)
@@ -119,7 +123,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TV
 			for si, subarc := range arcsFromKey[parent] {
 				if subarc.value == arc.value { // we could use arc value as a key; it should only be there once
 					subarc.cost = cost
-					parent = subarc.state
+					parent = subarc.state // same as relaxed
 					subarc.state = peerPtr
 					arcsFromKey[parent][si] = subarc
 					break
@@ -302,7 +306,12 @@ func SolveByFullExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context
 	return solveByExpansion[TValue, TCost](context, reducer, logger)
 }
 
-func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
+type PartitionStrategy[TValue cmp.Ordered, TCost cmp.Ordered] interface {
+	partition(states []*State[TValue, TCost], findCost func(i int) TCost) []*State[TValue, TCost]
+}
+
+func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
+	strategy PartitionStrategy[TValue, TCost], logger *log.Logger) (TCost, []TValue) {
 	reducer := func(children []*State[TValue, TCost], arcsTo map[*State[TValue, TCost]]arcTo[TValue, TCost]) []*State[TValue, TCost] {
 		// can put the method on the context object.
 		// or we can do the clustering (or sorting) here
@@ -310,10 +319,26 @@ func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue,
 		// our current merge operation assumes that the items being merged have the same parent.
 		// we don't necessarily need that restriction
 
-		slices.SortFunc(children, func(a, b *State[TValue, TCost]) int {
-			// return context.Compare(arcsTo[a].cost, arcsTo[b].cost)
-			return context.Compare((*a).Heuristic(context, arcsTo[a].cost), (*b).Heuristic(context, arcsTo[b].cost))
-		})
+		// it doesn't seem useful to have just a few merge nodes; those few will be too relaxed
+
+		// partition options:
+		// 1. cluster on cmax
+		// 2. by machine (for m partitions)
+		// 3. random groups; keep 1 best and merge the rest into another one
+		// 4. cluster on similarity of done jobs (though in the final layers they will have done most everything)
+
+		//keepers, groups := strategy.partition(children, func(i int) { return arcsTo[children[i]].cost })
+		//// making an assumption that keepers is not the same slice as children
+		//for g := 0; g < len(groups); g++ {
+		//	target := groups[g][0]
+		//	for i := 1; i < len(groups[g]); i++ {
+		//		target.MergeFrom(context, groups[g][i])
+		//		arc := arcsTo[groups[g][i]]
+		//		// left off: return a list of arcs all going to the same target, maybe by index
+		//	}
+		//	keepers = append(keepers, target)
+		//}
+		//return keepers
 		return children
 	}
 	return solveByExpansion[TValue, TCost](context, reducer, logger)
