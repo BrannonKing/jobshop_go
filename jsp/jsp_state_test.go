@@ -12,7 +12,7 @@ import (
 
 func TestFull(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[0]
+	instance := instances[4]
 	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, logger)
@@ -23,7 +23,7 @@ func TestFull(t *testing.T) {
 
 func TestRestricted(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[2]
+	instance := instances[4]
 	logger := log.New(os.Stdout, "", 0)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveRestricted[uint16, uint32](context, 300, logger)
@@ -34,10 +34,21 @@ func TestRestricted(t *testing.T) {
 
 func TestRelaxed(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[1]
+	instance := instances[4]
 	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspPartitionStrategy[uint16, uint32]{300}, logger)
+	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspRandGrpPartitionStrategy[uint16, uint32]{300}, logger)
+	if int(cost) != instance.Optimum {
+		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
+	}
+}
+
+func TestBnB(t *testing.T) {
+	instances := LoadInstances()
+	instance := instances[3]
+	logger := log.New(os.Stdout, "", 0)
+	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
+	cost, values := dd.SolveBnb[uint16, uint32](context, 300, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}
