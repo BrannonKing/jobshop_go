@@ -1,7 +1,6 @@
 package jsp
 
 import (
-	"github.com/stretchr/testify/assert"
 	"jobshop_go/dd"
 	"log"
 	"maps"
@@ -46,7 +45,7 @@ func TestRelaxed(t *testing.T) {
 func TestBnB(t *testing.T) {
 	//instances := LoadInstances()
 	//instance := instances[4]
-	instance := LoadRandom(4, 5)
+	instance := LoadRandom(5, 5)
 	logger := log.New(os.Stdout, "", 0)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveBnb[uint16, uint32](context, context.GetVariables()+1, logger)
@@ -66,32 +65,32 @@ func TestPermSepa(t *testing.T) {
 	}
 }
 
-func TestMerge(t *testing.T) {
-	a := JspState[uint16, int32]{}
-	a.job_all = map[uint16]int32{}
-	a.job_all[3] = 30
-	a.job_all[4] = 40
-	a.mach_completions = []int32{50, 60}
-	a.job_some = map[uint16]int32{}
-	a.job_some[1] = 10
-
-	b := JspState[uint16, int32]{}
-	b.job_all = map[uint16]int32{}
-	b.job_all[3] = 20
-	b.job_some = map[uint16]int32{}
-	b.mach_completions = []int32{5, 70}
-	b.job_some[4] = 25
-	b.job_some[5] = 50
-
-	a.MergeFrom(nil, &b)
-	assert.EqualValues(t, 2, len(a.mach_completions))
-	assert.EqualValues(t, 5, a.mach_completions[0])
-	assert.EqualValues(t, 60, a.mach_completions[1])
-	assert.EqualValues(t, 1, len(a.job_all))
-	assert.EqualValues(t, 30, a.job_all[3])
-	assert.EqualValues(t, 3, len(a.job_some))
-	assert.EqualValues(t, 40, a.job_some[4])
-}
+//func TestMerge(t *testing.T) {
+//	a := JspState[uint16, int32]{}
+//	a.job_all = map[uint16]int32{}
+//	a.job_all[3] = 30
+//	a.job_all[4] = 40
+//	a.mach_completions = []int32{50, 60}
+//	a.job_some = map[uint16]int32{}
+//	a.job_some[1] = 10
+//
+//	b := JspState[uint16, int32]{}
+//	b.job_all = map[uint16]int32{}
+//	b.job_all[3] = 20
+//	b.job_some = map[uint16]int32{}
+//	b.mach_completions = []int32{5, 70}
+//	b.job_some[4] = 25
+//	b.job_some[5] = 50
+//
+//	a.MergeFrom(nil, &b)
+//	assert.EqualValues(t, 2, len(a.mach_completions))
+//	assert.EqualValues(t, 5, a.mach_completions[0])
+//	assert.EqualValues(t, 60, a.mach_completions[1])
+//	assert.EqualValues(t, 1, len(a.job_all))
+//	assert.EqualValues(t, 30, a.job_all[3])
+//	assert.EqualValues(t, 3, len(a.job_some))
+//	assert.EqualValues(t, 40, a.job_some[4])
+//}
 
 type ITestState interface {
 	Equals(state ITestState) bool
