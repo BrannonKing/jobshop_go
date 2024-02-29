@@ -288,8 +288,11 @@ func solveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVal
 	if len(leafs) == 0 {
 		return nil, exact
 	}
-	// TODO: remove final reducer call for performance
-	return leafs[0], exact
+	// not sure if the final sort ran or not:
+	best := slices.MinFunc(leafs, func(a, b *State[TValue, TCost]) int {
+		return context.Compare((*a).Cost(context), (*b).Cost(context))
+	})
+	return best, exact
 }
 
 func SolveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
@@ -458,12 +461,14 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
 	maxWidth int, logger *log.Logger) (TCost, []TValue) {
 	starter := context.GetStartingState()
-	q := []layerState[TValue, TCost]{layerState[TValue, TCost]{&starter, 0}}
+	q := []layerState[TValue, TCost]{{&starter, 0}}
 	cutoff := context.WorstCost()
 	cutoffExact := false
 	closed := map[string]bool{}
 	var best *State[TValue, TCost]
+	i := 0
 	for len(q) > 0 {
+		i++
 		u := q[len(q)-1]
 		q[len(q)-1].state = nil
 		q = q[:len(q)-1]
@@ -474,7 +479,7 @@ func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCo
 			cost := (*restricted).Cost(context)
 			if context.Compare(cost, cutoff) < 0 ||
 				(exact && context.Compare(cost, cutoff) <= 0) {
-				logger.Printf("Restricted %d, %v, %v\n", len(q), cost, exact)
+				logger.Printf("%d: Restricted %d, %v, %v\n", i, len(q), cost, exact)
 				best = restricted
 				cutoff = cost
 				cutoffExact = exact
@@ -482,7 +487,7 @@ func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCo
 		}
 		if !exact {
 			cutset := fastCutset[TValue, TCost](cu, maxWidth, logger, cutoff, cutoffExact)
-			logger.Printf("Relaxed %d, %d\n", len(q), len(cutset))
+			// logger.Printf("Relaxed %d, %d\n", len(q), len(cutset))
 			for id, lstate := range cutset {
 				found := closed[id]
 				if !found {
@@ -492,6 +497,7 @@ func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCo
 			}
 		}
 	}
+	logger.Printf("%d: Done\n", i)
 	if best == nil {
 		return context.WorstCost(), nil
 	}

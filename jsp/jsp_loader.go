@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"math/rand"
 	"os"
 	"strconv"
 )
@@ -60,4 +61,26 @@ func LoadInstances() []*Instance {
 		_ = file.Close()
 	}
 	return instances
+}
+
+func LoadRandom(jobs, machines int) *Instance {
+	work := make([][]WorkPair, jobs)
+	for j := 0; j < jobs; j++ {
+		jobs := make([]WorkPair, machines)
+		for m := 0; m < machines; m++ {
+			jobs[m] = WorkPair{m, rand.Intn(200) + 20}
+		}
+		rand.Shuffle(len(jobs), func(i, j int) {
+			jobs[i], jobs[j] = jobs[j], jobs[i]
+		})
+		work[j] = jobs
+	}
+	return &Instance{
+		Name:     "Rand",
+		Jobs:     jobs,
+		Machines: machines,
+		Optimum:  0,
+		Path:     "",
+		Work:     work,
+	}
 }

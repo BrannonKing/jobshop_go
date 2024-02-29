@@ -44,11 +44,12 @@ func TestRelaxed(t *testing.T) {
 }
 
 func TestBnB(t *testing.T) {
-	instances := LoadInstances()
-	instance := instances[3]
+	//instances := LoadInstances()
+	//instance := instances[4]
+	instance := LoadRandom(4, 5)
 	logger := log.New(os.Stdout, "", 0)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveBnb[uint16, uint32](context, 300, logger)
+	cost, values := dd.SolveBnb[uint16, uint32](context, context.GetVariables()+1, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}

@@ -2,11 +2,11 @@ package jsp
 
 import (
 	"cmp"
-	"encoding/json"
 	"golang.org/x/exp/constraints"
 	"jobshop_go/dd"
 	"maps"
 	"slices"
+	"unsafe"
 )
 
 type jspDetails[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
@@ -35,6 +35,7 @@ type JspContext[TValue constraints.Unsigned, TCost constraints.Integer | constra
 	tasksByTotalDelay []TValue
 	tasksByMachine    [][]TValue
 	offset            int
+	varCount          int
 	startingState     dd.State[TValue, TCost]
 }
 
@@ -88,7 +89,7 @@ func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Int
 
 	starter := JspState[TValue, TCost]{make([]TCost, instance.Machines, instance.Machines), map[TValue]TCost{}, nil, 0, ""}
 	return &JspContext[TValue, TCost]{lookup, values, maxCost, instance,
-		tasksByTotalDelay, tasksByMachine, 0, &starter}
+		tasksByTotalDelay, tasksByMachine, 0, len(values), &starter}
 }
 
 func (j *JspContext[TValue, TCost]) GetStartingState() dd.State[TValue, TCost] {
@@ -100,7 +101,7 @@ func (j *JspContext[TValue, TCost]) GetValues() []TValue {
 }
 
 func (j *JspContext[TValue, TCost]) GetVariables() int {
-	return len(j.values)
+	return j.varCount
 }
 
 func (j *JspContext[TValue, TCost]) Compare(a, b TCost) int {
@@ -120,7 +121,7 @@ func (j *JspContext[TValue, TCost]) Child(state *dd.State[TValue, TCost], offset
 		}
 	}
 	return &JspContext[TValue, TCost]{j.lookup, values, j.maxCost, j.instance,
-		j.tasksByTotalDelay, j.tasksByMachine, offset, starter}
+		j.tasksByTotalDelay, j.tasksByMachine, offset, j.varCount, starter}
 }
 
 func (j *JspContext[TValue, TCost]) Offset() int {
@@ -341,11 +342,7 @@ func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string {
 			}
 		}
 		pairs = append(pairs, vcPair[TValue, TCost]{TValue(0), j.cmax})
-		bytes, err := json.Marshal(pairs) // eesh. this looks expensive
-		if err != nil {
-			panic(err)
-		}
-		j.id = string(bytes)
+		j.id = unsafe.String((*byte)(unsafe.Pointer(&pairs[0])), len(pairs)*int(unsafe.Sizeof(pairs[0])))
 	}
 	return j.id
 }
