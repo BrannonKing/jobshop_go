@@ -5,6 +5,9 @@ import (
 	"golang.org/x/exp/constraints"
 	"log"
 	"slices"
+	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // step 1: generate the unitary relaxed graph
@@ -461,42 +464,82 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
 	maxWidth int, logger *log.Logger) (TCost, []TValue) {
 	starter := context.GetStartingState()
-	q := []layerState[TValue, TCost]{{&starter, 0}}
+	const workers = 6
+	q := make([]layerState[TValue, TCost], 0, 100)
+	q = append(q, layerState[TValue, TCost]{&starter, 0})
 	cutoff := context.WorstCost()
 	cutoffExact := false
 	closed := map[string]bool{}
 	var best *State[TValue, TCost]
-	i := 0
-	for len(q) > 0 {
-		i++
-		u := q[len(q)-1]
-		q[len(q)-1].state = nil
-		q = q[:len(q)-1]
+	i := int64(0)
+	readers := int32(0)
+	var wg sync.WaitGroup
+	var mutex sync.Mutex
+	for worker := 0; worker < workers; worker++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				atomic.AddInt64(&i, 1)
+				atomic.AddInt32(&readers, 1)
+			TryRead:
+				var u layerState[TValue, TCost]
+				wantsSleep := false
+				mutex.Lock()
+				if len(q) == 0 && readers >= workers {
+					mutex.Unlock()
+					break
+				} else if len(q) == 0 {
+					wantsSleep = true
+				} else {
+					u = q[len(q)-1]
+					q[len(q)-1].state = nil
+					q = q[:len(q)-1]
+				}
+				mutex.Unlock()
+				if wantsSleep {
+					time.Sleep(time.Millisecond)
+					goto TryRead
+				}
+				atomic.AddInt32(&readers, -1)
 
-		cu := context.Child(u.state, u.layer)
-		restricted, exact := solveRestricted[TValue, TCost](cu, maxWidth, logger, cutoff, cutoffExact)
-		if restricted != nil {
-			cost := (*restricted).Cost(context)
-			if context.Compare(cost, cutoff) < 0 ||
-				(exact && context.Compare(cost, cutoff) <= 0) {
-				logger.Printf("%d: Restricted %d, %v, %v\n", i, len(q), cost, exact)
-				best = restricted
-				cutoff = cost
-				cutoffExact = exact
-			}
-		}
-		if !exact {
-			cutset := fastCutset[TValue, TCost](cu, maxWidth, logger, cutoff, cutoffExact)
-			// logger.Printf("Relaxed %d, %d\n", len(q), len(cutset))
-			for id, lstate := range cutset {
-				found := closed[id]
-				if !found {
-					closed[id] = true
-					q = append(q, lstate)
+				cu := context.Child(u.state, u.layer)
+				restricted, exact := solveRestricted[TValue, TCost](cu, maxWidth, logger, cutoff, cutoffExact)
+				if restricted != nil {
+					cost := (*restricted).Cost(context)
+					mutex.Lock()
+					if context.Compare(cost, cutoff) < 0 ||
+						(exact && context.Compare(cost, cutoff) <= 0) {
+						logger.Printf("%d: Restricted %d, %v, %v\n", i, len(q), cost, exact)
+						best = restricted
+						cutoff = cost
+						cutoffExact = exact
+					}
+					mutex.Unlock()
+				}
+				if !exact {
+					mutex.Lock()
+					lc := cutoff
+					lce := cutoffExact
+					mutex.Unlock()
+					cutset := fastCutset[TValue, TCost](cu, maxWidth, logger, lc, lce)
+					mutex.Lock()
+					if (i & 0xfff) == 0 {
+						logger.Printf("%d: Relaxed %d, %d\n", i, len(q), len(cutset))
+					}
+					for id, lstate := range cutset {
+						found := closed[id]
+						if !found {
+							closed[id] = true
+							q = append(q, lstate)
+						}
+					}
+					mutex.Unlock()
 				}
 			}
-		}
+		}()
 	}
+	wg.Wait()
 	logger.Printf("%d: Done\n", i)
 	if best == nil {
 		return context.WorstCost(), nil
