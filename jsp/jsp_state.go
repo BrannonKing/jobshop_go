@@ -187,11 +187,12 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 	ja := make([]vcPair[TValue, TCost], 0, len(j.job_all)+1)
 	for _, pair := range j.job_all {
 		if pair.V == value {
-			ja = append(ja, vcPair[TValue, TCost]{value, complete})
+			panic("Don't do the same value twice!")
 		} else {
 			ja = append(ja, pair)
 		}
 	}
+	ja = append(ja, vcPair[TValue, TCost]{value, complete})
 	var js []vcPair[TValue, TCost]
 	if j.job_some != nil {
 		js = make([]vcPair[TValue, TCost], 0, len(j.job_some))
@@ -250,9 +251,11 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 			j.mach_completions[m] = min(j.mach_completions[m], incoming.mach_completions[m])
 		}
 		j.cmax = min(j.cmax, incoming.cmax)
+		panic("not done")
 
 		// completions have to be in both.
 		// otherwise we have to take the worst of the maybes.
+		// we assume those in all are not in those in some.
 		//	for key, mc := range j.job_all {
 		//		mci, found := incoming.job_all[key]
 		//		if !found {
@@ -290,7 +293,6 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 		//			j.job_some[key] = mc
 		//		}
 		//	}
-		panic("Not implemented")
 	}
 }
 
@@ -413,5 +415,47 @@ func (j JspRandGrpPartitionStrategy[TValue, TCost]) Find(context dd.Context[TVal
 		lastStart = bestIdx + 1
 	}
 	result.MergeGroups = append(result.MergeGroups, dd.PartitionPair{lastStart, len(states)})
+	return result
+}
+
+type JspCombineWorstStrategy[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
+	MaxWidth int
+	Groups   int
+}
+
+func (j JspCombineWorstStrategy[TValue, TCost]) Find(context dd.Context[TValue, TCost], states []*dd.State[TValue, TCost]) dd.Partition {
+	// sort possibilities:
+	// 1. sort based on index of longest item first, then index of 2nd longest item, etc. Favors similar shapes.
+	// 2. k-means++ . No. We need more clusters than this can handle.
+	// 3.
+	//rand.Shuffle(len(states), func(i, j int) { // yikes! risky side-effects
+	//	states[i], states[j] = states[j], states[i]
+	//})
+	// if we're 500 wide and want only 100, we want groups of 5
+	result := dd.Partition{}
+	if len(states) <= j.MaxWidth {
+		result.Keepers = make([]int, len(states))
+		for i := range states {
+			result.Keepers[i] = i
+		}
+		return result
+	}
+
+	slices.SortFunc(states, func(a, b *dd.State[TValue, TCost]) int {
+		return context.Compare((*a).Cost(context), (*b).Cost(context))
+	})
+
+	width := j.MaxWidth - j.Groups
+	result.Keepers = make([]int, width)
+	for i := 0; i < width; i++ {
+		result.Keepers[i] = i
+	}
+
+	group_size := (len(states) - width) / (j.MaxWidth - width)
+	for i := 0; i < j.MaxWidth-width; i++ {
+		result.MergeGroups = append(result.MergeGroups, dd.PartitionPair{width + i*group_size, width + i*group_size + group_size})
+	}
+	result.MergeGroups[len(result.MergeGroups)-1].End = len(states)
+
 	return result
 }

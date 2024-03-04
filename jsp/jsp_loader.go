@@ -46,7 +46,7 @@ func LoadInstances() []*Instance {
 			if len(line) <= 0 || line[0] == '#' {
 				continue
 			}
-			splits := bytes.Split(line, []byte(" "))
+			splits := bytes.Fields(line)
 			if len(splits) <= 2 {
 				continue
 			}

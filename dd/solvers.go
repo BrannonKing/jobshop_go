@@ -5,6 +5,7 @@ import (
 	"golang.org/x/exp/constraints"
 	"log"
 	"slices"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -268,6 +269,9 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
 		}
 		parents = reducer(children)
+		if len(parents) <= 0 {
+			break
+		}
 	}
 	return parents
 }
@@ -290,7 +294,7 @@ func solveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVal
 	leafs := solveByExpansion[TValue, TCost](context, reducer, logger, cutoff, cutoffExact)
 	if len(leafs) == 0 {
 		return nil, exact
-	}
+	} // exact and no way through means we don't need a cutset from them
 	// not sure if the final sort ran or not:
 	best := slices.MinFunc(leafs, func(a, b *State[TValue, TCost]) int {
 		return context.Compare((*a).Cost(context), (*b).Cost(context))
@@ -374,6 +378,25 @@ type layerState[TValue cmp.Ordered, TCost cmp.Ordered] struct {
 	layer int
 }
 
+type doubleSort[TValue cmp.Ordered, TCost cmp.Ordered] struct {
+	children       []*State[TValue, TCost]
+	childToParents [][]int
+	context        Context[TValue, TCost]
+}
+
+func (d doubleSort[TValue, TCost]) Len() int {
+	return len(d.children)
+}
+
+func (d doubleSort[TValue, TCost]) Swap(i, j int) {
+	d.children[j], d.children[i] = d.children[i], d.children[j]
+	d.childToParents[j], d.childToParents[i] = d.childToParents[i], d.childToParents[j]
+}
+
+func (d doubleSort[TValue, TCost]) Less(i, j int) bool {
+	return d.context.Compare((*d.children[i]).Cost(d.context), (*d.children[j]).Cost(d.context)) < 0
+}
+
 func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
 	maxWidth int, logger *log.Logger, cutoff TCost, cutoffExact bool) map[string]layerState[TValue, TCost] {
 	closed := map[string]int{}
@@ -427,12 +450,16 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 		clear(closed)
 		if len(children) <= maxWidth {
 			parents = children
+			if len(parents) <= 0 {
+				break
+			}
 			continue
 		}
+		ds := doubleSort[TValue, TCost]{children, childToParents, context}
 		// sort our stuff. If selected for merge, put parent in cutset and yank their other kids
-		slices.SortFunc(children, func(a, b *State[TValue, TCost]) int {
-			return context.Compare((*a).Cost(context), (*b).Cost(context))
-		})
+		sort.Sort(ds)
+		// we're going to make a new merged node that has everything that doesn't fit in width.
+		// the parents of those need to go into our cutset, as they will then have a merged child.
 		for c, _ := range children[maxWidth:] {
 			cp := childToParents[c]
 			for _, parentIdx := range cp {
@@ -441,8 +468,9 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 			}
 		}
 
+		// now we're going to keep children as long as we didn't just put their parent into the cutset:
 		keepers := make([]*State[TValue, TCost], 0, maxWidth)
-		for c, child := range children[maxWidth:] {
+		for c, child := range children[:maxWidth] {
 			cp := childToParents[c]
 			unwanted := false
 			for _, parentIdx := range cp {
@@ -457,6 +485,9 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 			}
 		}
 		parents = keepers
+		if len(parents) <= 0 {
+			break
+		}
 	}
 	return cutset
 }
