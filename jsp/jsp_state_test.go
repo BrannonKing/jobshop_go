@@ -11,8 +11,9 @@ import (
 )
 
 func TestFull(t *testing.T) {
-	instances := LoadInstances()
-	instance := instances[4]
+	//instances := LoadInstances()
+	//instance := instances[3]
+	instance := LoadRandom(4, 5)
 	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveByFullExpansion[uint16, uint32](context, logger)
@@ -23,10 +24,11 @@ func TestFull(t *testing.T) {
 
 func TestRestricted(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[4]
-	logger := log.New(os.Stdout, "", 0)
+	instance := instances[5]
+	// instance := LoadRandom(4, 4)
+	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRestricted[uint16, uint32](context, 300, logger)
+	cost, values := dd.SolveRestricted[uint16, uint32](context, 501, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}
@@ -34,10 +36,10 @@ func TestRestricted(t *testing.T) {
 
 func TestRelaxed(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[5]
+	instance := instances[4]
 	logger := log.New(os.Stdout, "", 1)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspCombineWorstStrategy[uint16, uint32]{110, 1}, logger)
+	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspCombineWorstStrategy[uint16, uint32]{310, 1}, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}
@@ -48,10 +50,10 @@ func TestBnB(t *testing.T) {
 	// a way to swap out state models for test: one with no symmetry, vs midline, vs this one?
 	// a way to throw away cutsets from infeasible/cutoff relaxations, even though these are rare?
 	// do we at least have a way to measure how rare they are? Maybe we need a way to run the full relaxed tree.
-	// instances := LoadInstances()
-	// instance := instances[4] // 4 takes 1.5M iterations
-	rand.Seed(42)
-	instance := LoadRandom(5, 5)
+	instances := LoadInstances()
+	instance := instances[4] // 4 takes 1.5M iterations
+	// rand.Seed(42)
+	// instance := LoadRandom(4, 5)
 	logger := log.New(os.Stdout, "", 0)
 	context := NewJspPermutationContext[uint16, uint16](instance, math.MaxUint16)
 	cost, values := dd.SolveBnb[uint16, uint16](context, context.GetVariables()+4, logger)

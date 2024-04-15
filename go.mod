@@ -1,6 +1,6 @@
 module jobshop_go
 
-go 1.21
+go 1.22
 
 require github.com/oleiade/lane/v2 v2.0.0
 

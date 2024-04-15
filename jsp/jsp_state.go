@@ -115,7 +115,10 @@ func (j *JspContext[TValue, TCost]) Child(state *dd.State[TValue, TCost], offset
 	starter := (*state).(*JspState[TValue, TCost])
 	var values []TValue
 	for _, value := range j.values {
-		if slices.ContainsFunc(starter.job_all, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
+		if slices.ContainsFunc(starter.just_done, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
+			continue
+		}
+		if slices.ContainsFunc(starter.long_done, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
 			continue
 		}
 		values = append(values, value)
@@ -135,85 +138,89 @@ type vcPair[TValue, TCost any] struct {
 
 type JspState[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
 	mach_completions []TCost
-	job_all          []vcPair[TValue, TCost] // too slow: map[TValue]TCost
-	job_some         []vcPair[TValue, TCost] // nope: map[TValue]TCost
+	just_done        []vcPair[TValue, TCost] // too slow: map[TValue]TCost
+	long_done        []vcPair[TValue, TCost] // nope: map[TValue]TCost
 	cmax             TCost                   // caches the score for the restriction if necessary
 	id               string
 }
 
-func (j *JspState[TValue, TCost]) getCompletionTime(context dd.Context[TValue, TCost], value TValue) (TValue, TCost) {
-	for _, pair := range j.job_all {
+func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
+	for _, pair := range j.just_done {
 		if pair.V == value {
-			return TValue(0), context.WorstCost()
+			return nil
 		}
 	}
+	for _, pair := range j.long_done {
+		if pair.V == value {
+			return nil
+		}
+	}
+
 	details := context.(*JspContext[TValue, TCost]).lookup[value]
-	if details.prerequisite <= 0 {
-		return details.machine, j.mach_completions[details.machine] + details.delay
-	}
+	movePrereq := -1
 	startAt := TCost(0)
-	found := false
-	for _, pair := range j.job_all {
-		if pair.V == details.prerequisite-1 {
-			startAt = pair.C
-			found = true
-			break
-		}
-	}
-	if !found {
-		for _, pair := range j.job_some {
+	if details.prerequisite > 0 {
+		found := false
+		for p, pair := range j.just_done {
 			if pair.V == details.prerequisite-1 {
-				startAt = pair.C
 				found = true
+				movePrereq = p
+				startAt = pair.C
 				break
 			}
 		}
-	}
-	if !found {
-		return details.machine, context.WorstCost()
-	}
-	return details.machine, max(startAt, j.mach_completions[details.machine]) + details.delay
-}
-
-func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
-	machine, complete := j.getCompletionTime(context, value)
-	if complete == context.WorstCost() {
-		return nil
-	}
-	// jm := slices.Clone(j.mach_completions)
-	jm := make([]TCost, len(j.mach_completions))
-	copy(jm, j.mach_completions) // clone call seems slower
-	jm[machine] = complete
-	ja := make([]vcPair[TValue, TCost], 0, len(j.job_all)+1)
-	for _, pair := range j.job_all {
-		if pair.V == value {
-			panic("Don't do the same value twice!")
-		} else {
-			ja = append(ja, pair)
-		}
-	}
-	ja = append(ja, vcPair[TValue, TCost]{value, complete})
-	var js []vcPair[TValue, TCost]
-	if j.job_some != nil {
-		js = make([]vcPair[TValue, TCost], 0, len(j.job_some))
-		for _, pair := range j.job_some {
-			if pair.V != value {
-				ja = append(ja, pair)
+		if !found {
+			for _, pair := range j.long_done {
+				if pair.V == details.prerequisite-1 {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
 			}
 		}
 	}
+
+	// to support the maybes: if value in maybes yank it. Same for its prereq.
+
+	complete := max(startAt, j.mach_completions[details.machine]) + details.delay
+	jm := make([]TCost, len(j.mach_completions))
+	copy(jm, j.mach_completions) // clone call seems slower
+	jm[details.machine] = complete
+
+	var ld []vcPair[TValue, TCost]
+	if movePrereq >= 0 {
+		ld = make([]vcPair[TValue, TCost], len(j.long_done), len(j.long_done)+1)
+		copy(ld, j.long_done)
+	} else {
+		ld = j.long_done
+	}
+
+	var jd []vcPair[TValue, TCost]
+	if movePrereq >= 0 {
+		jd = make([]vcPair[TValue, TCost], len(j.just_done), len(j.just_done))
+		copy(jd, j.just_done) // clone call seems slower
+		ld = append(ld, jd[movePrereq])
+		jd[movePrereq] = vcPair[TValue, TCost]{value, complete}
+	} else {
+		jd = make([]vcPair[TValue, TCost], len(j.just_done), len(j.just_done)+1)
+		copy(jd, j.just_done) // clone call seems slower
+		jd = append(jd, vcPair[TValue, TCost]{value, complete})
+	}
+
 	trailer := TCost(0)
-	for _, value = range context.(*JspContext[TValue, TCost]).tasksByMachine[machine] {
-		if slices.ContainsFunc(ja, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
+	for _, value = range context.(*JspContext[TValue, TCost]).tasksByMachine[details.machine] {
+		if slices.ContainsFunc(jd, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
 			continue
 		}
-		if slices.ContainsFunc(js, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
+		if slices.ContainsFunc(ld, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
 			continue
 		}
 		details := context.(*JspContext[TValue, TCost]).lookup[value]
 		trailer += details.delay
 	}
-	return &JspState[TValue, TCost]{jm, ja, js, max(j.cmax, complete+trailer), ""}
+	return &JspState[TValue, TCost]{jm, jd, ld, max(j.cmax, complete+trailer), ""}
 }
 
 func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost {
@@ -222,11 +229,14 @@ func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost 
 
 func (j *JspState[TValue, TCost]) Solution(context dd.Context[TValue, TCost]) []TValue {
 	// copy the map into a slice and then sort it
-	slices.SortFunc(j.job_all, func(a, b vcPair[TValue, TCost]) int {
+	jd := make([]vcPair[TValue, TCost], len(j.just_done)+len(j.long_done))
+	copy(jd, j.just_done)
+	copy(jd[len(j.just_done):], j.long_done)
+	slices.SortFunc(jd, func(a, b vcPair[TValue, TCost]) int {
 		return context.Compare(a.C, b.C)
 	})
-	values := make([]TValue, 0, len(j.job_all))
-	for _, pair := range j.job_all {
+	values := make([]TValue, 0, len(jd))
+	for _, pair := range jd {
 		values = append(values, pair.V)
 	}
 	return values
@@ -236,13 +246,15 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 	// completions become intersection of two completions.
 	// maybies become union of maybies plus any rejected completions.
 	// cmax becomes biggest of any completions and the smallest maybe (since we know we've done at least one of those).
+
 	incoming := state.(*JspState[TValue, TCost])
-	if len(j.job_all) <= 0 && len(j.job_some) <= 0 {
+	if len(j.just_done) <= 0 {
 		// we're brand new; just copy in the other; and we never update those, so we can just point to the same data
 		j.mach_completions = incoming.mach_completions
-		j.job_all = incoming.job_all
-		j.job_some = incoming.job_some
 		j.cmax = incoming.cmax
+		j.long_done = incoming.long_done
+		j.just_done = incoming.just_done
+		j.id = incoming.id
 	} else {
 		// merge is a relaxed node: it has to be a lower bound
 		// Lukas's idea: merge sooner and make smaller merge groups.
@@ -251,48 +263,86 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 			j.mach_completions[m] = min(j.mach_completions[m], incoming.mach_completions[m])
 		}
 		j.cmax = min(j.cmax, incoming.cmax)
-		panic("not done")
 
-		// completions have to be in both.
-		// otherwise we have to take the worst of the maybes.
-		// we assume those in all are not in those in some.
-		//	for key, mc := range j.job_all {
-		//		mci, found := incoming.job_all[key]
-		//		if !found {
-		//			if mcs, found := j.job_some[key]; found {
-		//				// this can happen if we merge multiple in a row
-		//				j.job_some[key] = max(mcs, mc) // keep max until we see a relaxed sln > optimum
-		//			} else {
-		//				j.job_some[key] = mc
-		//			}
-		//			delete(j.job_all, key) // makes me nervous to delete from the thing we're iterating
-		//		} else {
-		//			// if it's in both, we need to keep the worst score for it. (not sure if that's min or max)
-		//			j.job_all[key] = max(mc, mci)
+		panic("This code is wrong")
+		// we have to track the "maybes" separately,
+		// because we have to allow expanding that value again if it was just a maybe.
+
+		mm := map[TValue]TCost{}
+		for _, vc := range j.long_done {
+			mm[vc.V] = vc.C
+		}
+		for _, vc := range j.just_done {
+			mm[vc.V] = vc.C
+		}
+		for _, vc := range incoming.long_done {
+			mm[vc.V] = max(mm[vc.V], vc.C)
+		}
+		for _, vc := range incoming.just_done {
+			mm[vc.V] = max(mm[vc.V], vc.C)
+		}
+		// now move all prereqs to long-done:
+		var ld []vcPair[TValue, TCost]
+		for key, cost := range mm {
+			details := context.(*JspContext[TValue, TCost]).lookup[key]
+			if prevcost, okay := mm[details.prerequisite-1]; okay && prevcost <= cost-details.delay {
+				ld = append(ld, vcPair[TValue, TCost]{details.prerequisite - 1, prevcost})
+			}
+		}
+
+		for _, pair := range ld {
+			delete(mm, pair.V)
+		}
+
+		jd := make([]vcPair[TValue, TCost], 0, len(mm))
+		for k, v := range mm {
+			jd = append(jd, vcPair[TValue, TCost]{k, v})
+		}
+		j.long_done = ld
+		j.just_done = jd
+		j.id = ""
+
 		//
-		//			// this should be implicit:
-		//			// details := context.(*JspContext[TValue, TCost]).lookup[key]
-		//			// j.mach_completions[details.machine] = max(j.mach_completions[details.machine], mc, mci)
-		//		}
-		//	}
-		//	for key, mci := range incoming.job_all {
-		//		_, found := j.job_all[key]
-		//		if !found { // already took intersection above
-		//			if mc, found := j.job_some[key]; found {
-		//				j.job_some[key] = max(mc, mci)
-		//			} else {
-		//				j.job_some[key] = mci
-		//			}
-		//		}
-		//	}
-		//	for key, mc := range incoming.job_some {
-		//		current, found := j.job_some[key]
-		//		if found {
-		//			j.job_some[key] = max(current, mc)
-		//		} else {
-		//			j.job_some[key] = mc
-		//		}
-		//	}
+		//	// completions have to be in both.
+		//	// otherwise we have to take the worst of the maybes.
+		//	// we assume those in all are not in those in some.
+		//	//	for key, mc := range j.job_all {
+		//	//		mci, found := incoming.job_all[key]
+		//	//		if !found {
+		//	//			if mcs, found := j.job_some[key]; found {
+		//	//				// this can happen if we merge multiple in a row
+		//	//				j.job_some[key] = max(mcs, mc) // keep max until we see a relaxed sln > optimum
+		//	//			} else {
+		//	//				j.job_some[key] = mc
+		//	//			}
+		//	//			delete(j.job_all, key) // makes me nervous to delete from the thing we're iterating
+		//	//		} else {
+		//	//			// if it's in both, we need to keep the worst score for it. (not sure if that's min or max)
+		//	//			j.job_all[key] = max(mc, mci)
+		//	//
+		//	//			// this should be implicit:
+		//	//			// details := context.(*JspContext[TValue, TCost]).lookup[key]
+		//	//			// j.mach_completions[details.machine] = max(j.mach_completions[details.machine], mc, mci)
+		//	//		}
+		//	//	}
+		//	//	for key, mci := range incoming.job_all {
+		//	//		_, found := j.job_all[key]
+		//	//		if !found { // already took intersection above
+		//	//			if mc, found := j.job_some[key]; found {
+		//	//				j.job_some[key] = max(mc, mci)
+		//	//			} else {
+		//	//				j.job_some[key] = mci
+		//	//			}
+		//	//		}
+		//	//	}
+		//	//	for key, mc := range incoming.job_some {
+		//	//		current, found := j.job_some[key]
+		//	//		if found {
+		//	//			j.job_some[key] = max(current, mc)
+		//	//		} else {
+		//	//			j.job_some[key] = mc
+		//	//		}
+		//	//	}
 	}
 }
 
@@ -361,14 +411,18 @@ func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost]) T
 func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string { // we assume that the result of this will be consumed right away
 	if len(j.id) == 0 {
 		var pairs []vcPair[TValue, TCost] // ditch layer in GetValues and make cutset include the layer it came from
-		for _, value := range context.(*JspContext[TValue, TCost]).GetValues() {
-			_, done := j.getCompletionTime(context, value)
-			if done != context.WorstCost() {
-				// we'll assume integer cost for now
-				pairs = append(pairs, vcPair[TValue, TCost]{value, done})
-			}
+		for _, pair := range j.just_done {
+			pairs = append(pairs, pair)
 		}
-		pairs = append(pairs, vcPair[TValue, TCost]{TValue(0), j.cmax}) // break ambiguity in the done state
+		for _, pair := range j.long_done {
+			pairs = append(pairs, vcPair[TValue, TCost]{pair.V, TCost(0)})
+		}
+		slices.SortFunc(pairs, func(a, b vcPair[TValue, TCost]) int {
+			if a.V == b.V {
+				return context.Compare(a.C, b.C)
+			}
+			return cmp.Compare(a.V, b.V)
+		})
 		// this assumes unsafe.Pointer increments the reference count
 		j.id = unsafe.String((*byte)(unsafe.Pointer(&pairs[0])), len(pairs)*int(unsafe.Sizeof(pairs[0])))
 	}
@@ -376,7 +430,7 @@ func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string {
 }
 
 func (j *JspState[TValue, TCost]) IsRelaxed() bool {
-	return len(j.job_some) > 0
+	return false
 }
 
 type JspRandGrpPartitionStrategy[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
