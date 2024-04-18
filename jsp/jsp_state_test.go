@@ -24,7 +24,7 @@ func TestFull(t *testing.T) {
 
 func TestRestricted(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[4]
+	instance := instances[5]
 	// instance := LoadRandom(4, 4)
 	logger := log.New(os.Stdout, "", log.Lmicroseconds)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
@@ -36,7 +36,7 @@ func TestRestricted(t *testing.T) {
 
 func TestRelaxed(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[4]
+	instance := instances[5]
 	logger := log.New(os.Stdout, "", log.Lmicroseconds)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
 	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspCombineWorstStrategy[uint16, uint32]{100, 1}, logger)
@@ -50,10 +50,10 @@ func TestBnB(t *testing.T) {
 	// a way to swap out state models for test: one with no symmetry, vs midline, vs this one?
 	// a way to throw away cutsets from infeasible/cutoff relaxations, even though these are rare?
 	// do we at least have a way to measure how rare they are? Maybe we need a way to run the full relaxed tree.
-	instances := LoadInstances()
-	instance := instances[4] // 4 takes 1.5M iterations
-	//rand.Seed(42)
-	//instance := LoadRandom(4, 4)
+	//instances := LoadInstances()
+	//instance := instances[4] // 4 takes 1.5M iterations
+	rand.Seed(42)
+	instance := LoadRandom(5, 5)
 	logger := log.New(os.Stdout, "", log.Lmicroseconds)
 	context := NewJspPermutationContext[uint16, uint16](instance, math.MaxUint16)
 	cost, values := dd.SolveBnb[uint16, uint16](context, context.GetVariables()+4, logger)

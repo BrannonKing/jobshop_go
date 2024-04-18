@@ -2,6 +2,7 @@ package dd
 
 import (
 	"cmp"
+	mapset "github.com/deckarep/golang-set/v2"
 	"golang.org/x/exp/constraints"
 	"log"
 	"slices"
@@ -34,7 +35,7 @@ type State[TValue cmp.Ordered, TCost any] interface {
 	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost], value TValue)
 	Heuristic(context Context[TValue, TCost]) TCost
 	ID(context Context[TValue, TCost]) string
-	IsRelaxed() bool
+	IsRelaxed(context Context[TValue, TCost]) bool
 	Solution(context Context[TValue, TCost]) []TValue
 	AppendCutset([]State[TValue, TCost])
 	Cutset() []State[TValue, TCost]
@@ -102,7 +103,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost constraints.Float | constraints
 		splitAtLeastOne := false
 		for j, arc := range bestArcs {
 			relaxed := *arc.state
-			if !relaxed.IsRelaxed() {
+			if !relaxed.IsRelaxed(context) {
 				continue
 			}
 			// TODO: remove this assertion:
@@ -268,9 +269,9 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 			}
 		}
 		clear(closed)
-		//if logger != nil {
-		//	logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
-		//}
+		if logger != nil {
+			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
+		}
 		parents = reducer(children)
 		if len(parents) <= 0 {
 			break
@@ -287,7 +288,7 @@ func solveRestricted[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVal
 			exact = false
 			// possible strategies: shuffle, sort, partial sort, sort with random chance of skip
 			slices.SortFunc(children, func(a, b *State[TValue, TCost]) int {
-				return context.Compare((*a).Cost(context), (*b).Cost(context))
+				return context.Compare((*a).Heuristic(context), (*b).Heuristic(context))
 			})
 			return children[:maxWidth]
 		} else {
@@ -562,6 +563,7 @@ func fastCutset2[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, 
 				for _, cut := range (*child).Cutset() {
 					cutset[cut.ID(context)] = layerState[TValue, TCost]{&cut, -1}
 				}
+				(*child).ClearCutset()
 			}
 			return cutset
 		}
@@ -579,21 +581,42 @@ func fastCutset2[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, 
 		// we're going to make a new merged node that has everything that doesn't fit in width.
 		// the parents of those need to go into our cutset, as they will then have a merged child.
 
-		for c, child := range children[maxWidth:] {
+		var added []State[TValue, TCost]
+		cutsetIndexes := mapset.NewThreadUnsafeSet[int]()
+		for c, _ := range children[maxWidth:] {
 			cp := childToParents[c]
-			var added []State[TValue, TCost]
+			// cutset is the nodes where at least one child is relaxed/merged.
+			// we're about to relax all these childs; so their parents need to go into the cutset
 			for _, parentIdx := range cp {
-				if !(*parents[parentIdx]).IsRelaxed() {
+				if !(*parents[parentIdx]).IsRelaxed(context) && !cutsetIndexes.Contains(parentIdx) {
+					// iterate all his children and add himself to their cutset
+					// but we don't have all their children handy, so we have to do the whole loop
 					added = append(added, *parents[parentIdx])
+					cutsetIndexes.Add(parentIdx)
 				}
 			}
-			(*child).AppendCutset(added)
 		}
 
 		merged := children[maxWidth]
 		for _, child := range children[maxWidth+1:] {
 			(*merged).MergeFrom(context, *child)
 		}
+		(*merged).AppendCutset(added)
+
+		for c, child := range children[:maxWidth] {
+			cp := childToParents[c]
+			if len(cp) == 1 && !cutsetIndexes.Contains(cp[0]) {
+				continue // try to speed up the typical case
+			}
+			addedToChild := make([]State[TValue, TCost], 0, len(cp))
+			for _, parentIdx := range cp {
+				if cutsetIndexes.Contains(parentIdx) {
+					addedToChild = append(addedToChild, *parents[parentIdx])
+				}
+			}
+			(*child).AppendCutset(addedToChild)
+		}
+
 		children[maxWidth] = merged
 		parents = children[:maxWidth+1]
 	}
