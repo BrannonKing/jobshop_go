@@ -36,6 +36,9 @@ type State[TValue cmp.Ordered, TCost any] interface {
 	ID(context Context[TValue, TCost]) string
 	IsRelaxed() bool
 	Solution(context Context[TValue, TCost]) []TValue
+	AppendCutset([]State[TValue, TCost])
+	Cutset() []State[TValue, TCost]
+	ClearCutset()
 }
 
 type arcTo[TValue cmp.Ordered, TCost any] struct {
@@ -146,7 +149,7 @@ func SolveBySeparation[TValue cmp.Ordered, TCost constraints.Float | constraints
 			}
 			return bestCost, bestValues
 		}
-		if logger != nil && ((rounds%1000) == 0 || logger.Flags() == 1) {
+		if logger != nil && (rounds%1000) == 0 {
 			logger.Printf("Round %d, %d nodes, %v bound\n", rounds, nodes, bestCost)
 		}
 	}
@@ -265,9 +268,9 @@ func solveByExpansion[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TVa
 			}
 		}
 		clear(closed)
-		if logger != nil && (logger.Flags()&1) == 1 {
-			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
-		}
+		//if logger != nil {
+		//	logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
+		//}
 		parents = reducer(children)
 		if len(parents) <= 0 {
 			break
@@ -427,7 +430,8 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 					}
 				}
 				// here is an expensive check for existing nodes.
-				// we're not sure if the size of the map is less than the size of the additional duplicate nodes
+				// we're not sure if the size of the map is less than the size of the additional duplicate nodes.
+				// TODO: just skip this for merged nodes
 				key := child.ID(context)
 				existingIdx, found := closed[key]
 				var childPtr *State[TValue, TCost]
@@ -444,7 +448,7 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 				}
 			}
 		}
-		if logger != nil && (logger.Flags()&1) == 1 {
+		if logger != nil {
 			logger.Printf("Layer %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
 		}
 		clear(closed)
@@ -490,6 +494,110 @@ func fastCutset[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, T
 		}
 	}
 	return cutset
+}
+
+func fastCutset2[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
+	maxWidth int, logger *log.Logger, cutoff TCost, cutoffExact bool) map[string]layerState[TValue, TCost] {
+	//left off: maybe don't use strategy; just sort them. pass in parent map here and sort that too, like done in fast cutset
+	//put cutset parent into each of their children. pass that down afterward
+	//but a merged node can hold multiple cutset nodes; have to pass them all down (and remove them all at the end!)
+
+	closed := map[string]int{}
+	starter := context.GetStartingState()
+	parents := []*State[TValue, TCost]{&starter}
+	variables := context.GetVariables()
+	for j := context.Offset(); j < variables; j++ {
+		var children []*State[TValue, TCost]
+		var childToParents [][]int
+		duplicates := 0
+		for p, parent := range parents {
+			cv := context.GetValues()
+			if len(cv) > maxWidth {
+				panic("maxWidth is too small!")
+			}
+			for _, value := range cv {
+				child := (*parent).TransitionTo(context, value)
+				if child == nil {
+					continue
+				}
+				if cutoff != context.WorstCost() {
+					cost := child.Cost(context)
+					if cutoffExact && context.Compare(cost, cutoff) >= 0 {
+						continue
+					} else if !cutoffExact && context.Compare(cost, cutoff) > 0 {
+						continue
+					}
+				}
+				// here is an expensive check for existing nodes.
+				// we're not sure if the size of the map is less than the size of the additional duplicate nodes.
+				// TODO: just skip this for merged nodes
+				key := child.ID(context)
+				existingIdx, found := closed[key]
+				var childPtr *State[TValue, TCost]
+				if found {
+					childPtr = children[existingIdx]
+					duplicates += 1
+					childToParents[existingIdx] = append(childToParents[existingIdx], p)
+				}
+				if childPtr == nil {
+					childPtr = &child
+					closed[key] = len(children)
+					children = append(children, childPtr)
+					childToParents = append(childToParents, []int{p})
+				}
+				(*childPtr).AppendCutset((*parent).Cutset())
+			}
+			(*parent).ClearCutset()
+		}
+		//if logger != nil {
+		//	logger.Printf("LayerFC %d, %d nodes, %d duplicates\n", j+1, len(children), duplicates)
+		//}
+		clear(closed)
+
+		if j == variables-1 {
+			// all nodes on the bottom layer outside of cutoff should have been dropped.
+			// therefore, any cutset that makes it to the bottom is a keeper
+			cutset := map[string]layerState[TValue, TCost]{}
+			for _, child := range children {
+				for _, cut := range (*child).Cutset() {
+					cutset[cut.ID(context)] = layerState[TValue, TCost]{&cut, -1}
+				}
+			}
+			return cutset
+		}
+
+		if len(children) <= maxWidth {
+			parents = children
+			if len(parents) <= 0 {
+				break
+			}
+			continue
+		}
+		ds := doubleSort[TValue, TCost]{children, childToParents, context}
+		// sort our stuff. If selected for merge, put parent in cutset and yank their other kids
+		sort.Sort(ds)
+		// we're going to make a new merged node that has everything that doesn't fit in width.
+		// the parents of those need to go into our cutset, as they will then have a merged child.
+
+		for c, child := range children[maxWidth:] {
+			cp := childToParents[c]
+			var added []State[TValue, TCost]
+			for _, parentIdx := range cp {
+				if !(*parents[parentIdx]).IsRelaxed() {
+					added = append(added, *parents[parentIdx])
+				}
+			}
+			(*child).AppendCutset(added)
+		}
+
+		merged := children[maxWidth]
+		for _, child := range children[maxWidth+1:] {
+			(*merged).MergeFrom(context, *child)
+		}
+		children[maxWidth] = merged
+		parents = children[:maxWidth+1]
+	}
+	return map[string]layerState[TValue, TCost]{}
 }
 
 func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCost],
@@ -553,9 +661,9 @@ func SolveBnb[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue, TCo
 					lc := cutoff
 					lce := cutoffExact
 					mutex.Unlock()
-					cutset := fastCutset[TValue, TCost](cu, maxWidth, logger, lc, lce)
+					cutset := fastCutset2[TValue, TCost](cu, maxWidth, logger, lc, lce)
 					mutex.Lock()
-					if (i & 0xfff) == 0 {
+					if (i & 0x3f) == 0 {
 						logger.Printf("%d: Relaxed %d, %d\n", i, len(q), len(cutset))
 					}
 					for id, lstate := range cutset {

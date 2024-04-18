@@ -2,8 +2,10 @@ package jsp
 
 import (
 	"cmp"
+	mapset "github.com/deckarep/golang-set/v2"
 	"golang.org/x/exp/constraints"
 	"jobshop_go/dd"
+	"maps"
 	"slices"
 	"unsafe"
 )
@@ -86,7 +88,7 @@ func NewJspPermutationContext[TValue constraints.Unsigned, TCost constraints.Int
 		return da.totalPostOps > db.totalPostOps
 	})
 
-	starter := JspState[TValue, TCost]{make([]TCost, instance.Machines, instance.Machines), nil, nil, 0, ""}
+	starter := JspState[TValue, TCost]{make([]TCost, instance.Machines, instance.Machines), nil, nil, 0, "", nil, nil}
 	return &JspContext[TValue, TCost]{lookup, values, maxCost, instance,
 		tasksByTotalDelay, tasksByMachine, 0, len(values), &starter}
 }
@@ -123,6 +125,12 @@ func (j *JspContext[TValue, TCost]) Child(state *dd.State[TValue, TCost], offset
 		}
 		values = append(values, value)
 	}
+	if offset < 0 {
+		offset = len(starter.just_done) + len(starter.long_done)
+	}
+	if len(starter.maybe) > 0 {
+		panic("Not expected")
+	}
 	return &JspContext[TValue, TCost]{j.lookup, values, j.maxCost, j.instance,
 		j.tasksByTotalDelay, j.tasksByMachine, offset, j.varCount, starter}
 }
@@ -142,6 +150,19 @@ type JspState[TValue constraints.Unsigned, TCost constraints.Integer | constrain
 	long_done        []vcPair[TValue, TCost] // nope: map[TValue]TCost
 	cmax             TCost                   // caches the score for the restriction if necessary
 	id               string
+	maybe            map[TValue]TCost
+	cutset           []dd.State[TValue, TCost]
+}
+
+func (j *JspState[TValue, TCost]) AppendCutset(states []dd.State[TValue, TCost]) {
+	j.cutset = append(j.cutset, states...)
+}
+func (j *JspState[TValue, TCost]) Cutset() []dd.State[TValue, TCost] {
+	return j.cutset
+}
+
+func (j *JspState[TValue, TCost]) ClearCutset() {
+	j.cutset = nil
 }
 
 func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
@@ -159,6 +180,8 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 	details := context.(*JspContext[TValue, TCost]).lookup[value]
 	movePrereq := -1
 	startAt := TCost(0)
+	maybe := j.maybe
+	maybePrereq := false
 	if details.prerequisite > 0 {
 		found := false
 		for p, pair := range j.just_done {
@@ -177,7 +200,13 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 				}
 			}
 			if !found {
-				return nil
+				if maybe != nil {
+					startAt, found = maybe[details.prerequisite-1]
+					maybePrereq = found
+				}
+				if !found {
+					return nil
+				}
 			}
 		}
 	}
@@ -190,7 +219,7 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 	jm[details.machine] = complete
 
 	var ld []vcPair[TValue, TCost]
-	if movePrereq >= 0 {
+	if movePrereq >= 0 || maybePrereq {
 		ld = make([]vcPair[TValue, TCost], len(j.long_done), len(j.long_done)+1)
 		copy(ld, j.long_done)
 	} else {
@@ -209,6 +238,22 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 		jd = append(jd, vcPair[TValue, TCost]{value, complete})
 	}
 
+	if maybe != nil {
+		_, ok1 := maybe[value]
+		if ok1 {
+			maybe = maps.Clone(j.maybe)
+			delete(maybe, value)
+		}
+		pv, ok2 := maybe[details.prerequisite-1]
+		if ok2 && details.prerequisite > 0 {
+			if !ok1 {
+				maybe = maps.Clone(j.maybe)
+			}
+			delete(maybe, details.prerequisite-1)
+			ld = append(ld, vcPair[TValue, TCost]{details.prerequisite - 1, pv})
+		}
+	}
+
 	trailer := TCost(0)
 	for _, value = range context.(*JspContext[TValue, TCost]).tasksByMachine[details.machine] {
 		if slices.ContainsFunc(jd, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
@@ -217,10 +262,13 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 		if slices.ContainsFunc(ld, func(v vcPair[TValue, TCost]) bool { return v.V == value }) {
 			continue
 		}
+		if maybe != nil && maybe[value] > 0 {
+			continue
+		}
 		details := context.(*JspContext[TValue, TCost]).lookup[value]
 		trailer += details.delay
 	}
-	return &JspState[TValue, TCost]{jm, jd, ld, max(j.cmax, complete+trailer), ""}
+	return &JspState[TValue, TCost]{jm, jd, ld, max(j.cmax, complete+trailer), "", maybe, nil}
 }
 
 func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost {
@@ -248,13 +296,15 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 	// cmax becomes biggest of any completions and the smallest maybe (since we know we've done at least one of those).
 
 	incoming := state.(*JspState[TValue, TCost])
-	if len(j.just_done) <= 0 {
+	if len(j.just_done) <= 0 && j.maybe == nil {
 		// we're brand new; just copy in the other; and we never update those, so we can just point to the same data
 		j.mach_completions = incoming.mach_completions
 		j.cmax = incoming.cmax
 		j.long_done = incoming.long_done
 		j.just_done = incoming.just_done
 		j.id = incoming.id
+		j.maybe = incoming.maybe
+		j.cutset = incoming.cutset
 	} else {
 		// merge is a relaxed node: it has to be a lower bound
 		// Lukas's idea: merge sooner and make smaller merge groups.
@@ -264,43 +314,89 @@ func (j *JspState[TValue, TCost]) MergeFrom(context dd.Context[TValue, TCost], s
 		}
 		j.cmax = min(j.cmax, incoming.cmax)
 
-		panic("This code is wrong")
 		// we have to track the "maybes" separately,
 		// because we have to allow expanding that value again if it was just a maybe.
 
-		mm := map[TValue]TCost{}
-		for _, vc := range j.long_done {
-			mm[vc.V] = vc.C
+		// we are going to make an assumption that it will be hard to match nodes when they have maybes
+		// so we aren't going to try very hard
+		maybe := map[TValue]TCost{}
+		if j.maybe != nil {
+			for k, v := range j.maybe {
+				maybe[k] = v
+			}
 		}
-		for _, vc := range j.just_done {
-			mm[vc.V] = vc.C
-		}
-		for _, vc := range incoming.long_done {
-			mm[vc.V] = max(mm[vc.V], vc.C)
-		}
-		for _, vc := range incoming.just_done {
-			mm[vc.V] = max(mm[vc.V], vc.C)
-		}
-		// now move all prereqs to long-done:
-		var ld []vcPair[TValue, TCost]
-		for key, cost := range mm {
-			details := context.(*JspContext[TValue, TCost]).lookup[key]
-			if prevcost, okay := mm[details.prerequisite-1]; okay && prevcost <= cost-details.delay {
-				ld = append(ld, vcPair[TValue, TCost]{details.prerequisite - 1, prevcost})
+		if incoming.maybe != nil {
+			for k, v := range incoming.maybe {
+				maybe[k] = max(maybe[k], v)
 			}
 		}
 
-		for _, pair := range ld {
-			delete(mm, pair.V)
+		ldc := mapset.NewThreadUnsafeSetWithSize[TValue](len(j.long_done))
+		for _, vc := range j.long_done {
+			ldc.Add(vc.V)
+		}
+		ldi := mapset.NewThreadUnsafeSetWithSize[TValue](len(incoming.long_done))
+		for _, vc := range incoming.long_done {
+			ldi.Add(vc.V)
+		}
+		keepers := ldc.Intersect(ldi)
+		var ld []vcPair[TValue, TCost]
+		for _, vc := range j.long_done {
+			if keepers.Contains(vc.V) {
+				ld = append(ld, vc)
+			} else {
+				maybe[vc.V] = max(maybe[vc.V], vc.C)
+			}
+		}
+		for _, vc := range incoming.long_done {
+			if keepers.Contains(vc.V) {
+				for li := 0; li < len(ld); li++ {
+					if ld[li].V == vc.V {
+						ld[li].C = max(ld[li].C, vc.C)
+						break
+					}
+				}
+			} else {
+				maybe[vc.V] = max(maybe[vc.V], vc.C)
+			}
 		}
 
-		jd := make([]vcPair[TValue, TCost], 0, len(mm))
-		for k, v := range mm {
-			jd = append(jd, vcPair[TValue, TCost]{k, v})
+		jdc := mapset.NewThreadUnsafeSetWithSize[TValue](len(j.just_done))
+		for _, vc := range j.just_done {
+			jdc.Add(vc.V)
 		}
+		jdi := mapset.NewThreadUnsafeSetWithSize[TValue](len(incoming.just_done))
+		for _, vc := range incoming.just_done {
+			jdi.Add(vc.V)
+		}
+		keepers = jdc.Intersect(jdi)
+		var jd []vcPair[TValue, TCost]
+		for _, vc := range j.just_done {
+			if keepers.Contains(vc.V) {
+				ld = append(ld, vc)
+			} else {
+				maybe[vc.V] = max(maybe[vc.V], vc.C)
+			}
+		}
+		for _, vc := range incoming.just_done {
+			if keepers.Contains(vc.V) {
+				for ji := 0; ji < len(jd); ji++ {
+					if jd[ji].V == vc.V {
+						jd[ji].C = max(jd[ji].C, vc.C)
+						break
+					}
+				}
+			} else {
+				maybe[vc.V] = max(maybe[vc.V], vc.C)
+			}
+		}
+
 		j.long_done = ld
 		j.just_done = jd
 		j.id = ""
+		j.maybe = maybe
+		j.AppendCutset(incoming.Cutset())
+		incoming.ClearCutset()
 
 		//
 		//	// completions have to be in both.
@@ -417,6 +513,11 @@ func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string {
 		for _, pair := range j.long_done {
 			pairs = append(pairs, vcPair[TValue, TCost]{pair.V, TCost(0)})
 		}
+		if j.maybe != nil {
+			for k, v := range j.maybe {
+				pairs = append(pairs, vcPair[TValue, TCost]{k, v})
+			}
+		}
 		slices.SortFunc(pairs, func(a, b vcPair[TValue, TCost]) int {
 			if a.V == b.V {
 				return context.Compare(a.C, b.C)
@@ -430,7 +531,7 @@ func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string {
 }
 
 func (j *JspState[TValue, TCost]) IsRelaxed() bool {
-	return false
+	return len(j.maybe) > 0
 }
 
 type JspRandGrpPartitionStrategy[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
