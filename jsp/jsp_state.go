@@ -289,6 +289,34 @@ func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost 
 	return j.cmax
 }
 
+func (j *JspState[TValue, TCost]) Penalty(context dd.Context[TValue, TCost]) TCost {
+
+	return TCost(len(j.maybe))
+
+	if len(j.maybe) == 0 {
+		return TCost(0)
+	}
+
+	// want to add up overlap in the current solution:
+	// option 1: order the values; divvy them for each machine; if they are longer than mach, penalize it
+	// option 2: for each maybe, see if it overlaps its prereq. If so, add that to the penalty
+
+	s := TCost(0)
+	for k, v := range j.maybe {
+		details := context.(*JspContext[TValue, TCost]).lookup[k]
+		if details.prerequisite > 0 {
+			v2, found := j.maybe[details.prerequisite-1]
+			if !found {
+				s += details.delay
+			} else if v-details.delay < v2 {
+				s += v2 - (v - details.delay)
+			}
+		}
+	}
+
+	return s
+}
+
 func (j *JspState[TValue, TCost]) Solution(context dd.Context[TValue, TCost]) []TValue {
 	// copy the map into a slice and then sort it
 	jd := make([]vcPair[TValue, TCost], len(j.just_done)+len(j.long_done))
@@ -499,7 +527,7 @@ func (j *JspContext[TValue, TCost]) heuristic(state *JspState[TValue, TCost]) TC
 	return 0
 }
 
-func (j *JspState[TValue, TCost]) mostWorkRemaining(context dd.Context[TValue, TCost]) TCost {
+func (j *JspState[TValue, TCost]) MostWorkRemaining(context dd.Context[TValue, TCost]) TCost {
 	dones := map[TValue]TCost{}
 	for _, pair := range j.long_done {
 		dones[pair.V] = pair.C
@@ -534,7 +562,7 @@ func (j *JspState[TValue, TCost]) mostWorkRemaining(context dd.Context[TValue, T
 	return slices.Max(mcs)
 }
 
-func (j *JspState[TValue, TCost]) mostOpsRemaining(context dd.Context[TValue, TCost]) TCost {
+func (j *JspState[TValue, TCost]) MostOpsRemaining(context dd.Context[TValue, TCost]) TCost {
 	dones := map[TValue]TCost{}
 	for _, pair := range j.long_done {
 		dones[pair.V] = pair.C
@@ -578,7 +606,17 @@ func (j *JspState[TValue, TCost]) mostOpsRemaining(context dd.Context[TValue, TC
 func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost]) TCost {
 
 	// 202, 116, 28 : 1374
-	// return j.cmax
+	return j.cmax
+
+	// TODO: try measuring shannon entropy for our vector vs the others in the set. could also try variance of mach
+
+	// try comparing our current numbers to actuals -- eh; they're all exact:
+	//_, machs := j.buildActuals(context)
+	//s := TCost(0)
+	//for i := 0; i < len(machs); i++ {
+	//	s += max(machs[i], j.mach_completions[i]) - min(machs[i], j.mach_completions[i])
+	//}
+	//return s
 
 	// 224, 200, 98 : 1472
 	//s := TCost(0)
@@ -592,10 +630,10 @@ func (j *JspState[TValue, TCost]) Heuristic(context dd.Context[TValue, TCost]) T
 	//return slices.Max(j.mach_completions) - slices.Min(j.mach_completions)
 
 	// 206, 147, 45 : 1376
-	// return j.mostWorkRemaining(context)
+	// return j.MostWorkRemaining(context)
 
 	// 149, 77, 26 : 1366
-	return j.mostOpsRemaining(context)
+	// return j.MostOpsRemaining(context)
 
 	// return an estimate of the remaining time
 	//if j.heuristic > 0 {
@@ -649,23 +687,13 @@ func (j *JspState[TValue, TCost]) ID(context dd.Context[TValue, TCost]) string {
 	return j.id
 }
 
-func (j *JspState[TValue, TCost]) IsRelaxed(context dd.Context[TValue, TCost]) bool {
-	if len(j.maybe) > 0 {
-		return true
-	}
-	if len(j.just_done) <= 0 {
-		return false
-	}
+func (j *JspState[TValue, TCost]) buildActuals(context dd.Context[TValue, TCost]) (map[TValue]TCost, []TCost) {
 	jd := make([]vcPair[TValue, TCost], len(j.just_done)+len(j.long_done))
 	copy(jd, j.just_done)
 	copy(jd[len(j.just_done):], j.long_done)
 	slices.SortFunc(jd, func(a, b vcPair[TValue, TCost]) int {
 		return cmp.Compare[TCost](a.C, b.C)
 	})
-	values := make([]TValue, 0, len(jd))
-	for _, pair := range jd {
-		values = append(values, pair.V)
-	}
 	ops := map[TValue]TCost{}
 	machs := make([]TCost, len(j.mach_completions))
 	for _, pair := range jd {
@@ -674,7 +702,7 @@ func (j *JspState[TValue, TCost]) IsRelaxed(context dd.Context[TValue, TCost]) b
 		if details.prerequisite > 0 {
 			preAt, found := ops[details.prerequisite-1]
 			if !found {
-				return true
+				return nil, nil
 			}
 			startsAt = max(startsAt, preAt)
 		}
@@ -682,6 +710,17 @@ func (j *JspState[TValue, TCost]) IsRelaxed(context dd.Context[TValue, TCost]) b
 		ops[pair.V] = complete
 		machs[details.machine] = complete
 	}
+	return ops, machs
+}
+
+func (j *JspState[TValue, TCost]) IsRelaxed(context dd.Context[TValue, TCost]) bool {
+	if len(j.maybe) > 0 {
+		return true
+	}
+	if len(j.just_done) <= 0 {
+		return false
+	}
+	_, machs := j.buildActuals(context)
 	return !slices.Equal(machs, j.mach_completions)
 }
 
@@ -725,8 +764,9 @@ func (j JspRandGrpPartitionStrategy[TValue, TCost]) Find(context dd.Context[TVal
 }
 
 type JspCombineWorstStrategy[TValue constraints.Unsigned, TCost constraints.Integer | constraints.Float] struct {
-	MaxWidth int
-	Groups   int
+	MaxWidth          int
+	Groups            int
+	PenaltyMultiplier float32
 }
 
 func (j JspCombineWorstStrategy[TValue, TCost]) Find(context dd.Context[TValue, TCost], states []*dd.State[TValue, TCost]) dd.Partition {
@@ -748,7 +788,9 @@ func (j JspCombineWorstStrategy[TValue, TCost]) Find(context dd.Context[TValue, 
 	}
 
 	slices.SortFunc(states, func(a, b *dd.State[TValue, TCost]) int {
-		return context.Compare((*a).Cost(context), (*b).Cost(context))
+		pa := TCost(float32((*a).Penalty(context)) * j.PenaltyMultiplier)
+		pb := TCost(float32((*b).Penalty(context)) * j.PenaltyMultiplier)
+		return context.Compare((*a).Cost(context)+pa, (*b).Cost(context)+pb)
 	})
 
 	width := j.MaxWidth - j.Groups

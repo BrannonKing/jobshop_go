@@ -28,6 +28,8 @@ func TestRestricted(t *testing.T) {
 	// instance := LoadRandom(4, 4)
 	logger := log.New(os.Stdout, "", log.Lmicroseconds)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
+	ss := context.startingState.(*JspState[uint16, uint32])
+	logger.Printf("MOR: %d, MWR: %d", ss.MostOpsRemaining(context), ss.MostWorkRemaining(context))
 	cost, values := dd.SolveRestricted[uint16, uint32](context, context.varCount*2, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
@@ -36,10 +38,10 @@ func TestRestricted(t *testing.T) {
 
 func TestRelaxed(t *testing.T) {
 	instances := LoadInstances()
-	instance := instances[5]
+	instance := instances[4]
 	logger := log.New(os.Stdout, "", log.Lmicroseconds)
 	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
-	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspCombineWorstStrategy[uint16, uint32]{100, 1}, logger)
+	cost, values := dd.SolveRelaxed[uint16, uint32](context, JspCombineWorstStrategy[uint16, uint32]{context.varCount * 2, 2, 5.2}, logger)
 	if int(cost) != instance.Optimum {
 		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
 	}

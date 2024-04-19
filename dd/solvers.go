@@ -31,6 +31,7 @@ type Context[TValue cmp.Ordered, TCost any] interface {
 type State[TValue cmp.Ordered, TCost any] interface {
 	TransitionTo(context Context[TValue, TCost], value TValue) State[TValue, TCost]
 	Cost(context Context[TValue, TCost]) TCost
+	Penalty(context Context[TValue, TCost]) TCost
 	MergeFrom(context Context[TValue, TCost], state State[TValue, TCost])
 	Unrelax(context Context[TValue, TCost], removed State[TValue, TCost], value TValue)
 	Heuristic(context Context[TValue, TCost]) TCost
