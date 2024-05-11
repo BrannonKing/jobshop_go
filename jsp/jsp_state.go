@@ -166,6 +166,10 @@ func (j *JspState[TValue, TCost]) ClearCutset() {
 	j.cutset = nil
 }
 
+func (j *JspState[TValue, TCost]) IsComplete(context dd.Context[TValue, TCost]) bool {
+	return len(j.just_done)+len(j.long_done) == context.GetVariables()
+}
+
 func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost], value TValue) dd.State[TValue, TCost] {
 	for _, pair := range j.just_done {
 		if pair.V == value {
@@ -282,7 +286,8 @@ func (j *JspState[TValue, TCost]) TransitionTo(context dd.Context[TValue, TCost]
 		details := context.(*JspContext[TValue, TCost]).lookup[value]
 		trailer += details.delay
 	}
-	return &JspState[TValue, TCost]{jm, jd, ld, max(j.cmax, complete+trailer), "", maybe, nil}
+	cmax := max(j.cmax, complete+trailer) // +trailer, complete+details.totalDelay-details.delay)
+	return &JspState[TValue, TCost]{jm, jd, ld, cmax, "", maybe, nil}
 }
 
 func (j *JspState[TValue, TCost]) Cost(context dd.Context[TValue, TCost]) TCost {

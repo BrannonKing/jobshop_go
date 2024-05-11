@@ -358,7 +358,13 @@ func SolveRelaxed[TValue cmp.Ordered, TCost cmp.Ordered](context Context[TValue,
 		return context.WorstCost(), nil
 	}
 	// TODO: remove final reducer call for performance
-	best := *slices.MinFunc(results, func(a, b *State[TValue, TCost]) int {
+	var r2 []*State[TValue, TCost]
+	for _, r := range results {
+		if !(*r).IsRelaxed(context) {
+			r2 = append(r2, r)
+		}
+	}
+	best := *slices.MinFunc(r2, func(a, b *State[TValue, TCost]) int {
 		return context.Compare((*a).Cost(context), (*b).Cost(context))
 	})
 	return best.Cost(context), best.Solution(context)

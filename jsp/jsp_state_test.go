@@ -64,6 +64,21 @@ func TestBnB(t *testing.T) {
 	}
 }
 
+func TestAStar(t *testing.T) {
+	instances := LoadInstances()
+	instance := instances[4]
+	// instance := LoadRandom(4, 4)
+	logger := log.New(os.Stdout, "", log.Lmicroseconds)
+	context := NewJspPermutationContext[uint16, uint32](instance, 0xffffffff)
+	ss := context.startingState.(*JspState[uint16, uint32])
+	logger.Printf("MOR: %d, MWR: %d", ss.MostOpsRemaining(context), ss.MostWorkRemaining(context))
+	cost, values := aStarSearch[uint16, uint32](*context)
+	logger.Printf("Final: %d", cost)
+	if int(cost) != instance.Optimum {
+		t.Fatalf("Bad cost: %d != %d : %v\n", cost, instance.Optimum, values)
+	}
+}
+
 func TestPermSepa(t *testing.T) {
 	instances := LoadInstances()
 	instance := instances[0]
